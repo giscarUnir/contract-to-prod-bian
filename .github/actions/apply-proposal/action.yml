@@ -51,8 +51,8 @@ runs:
                 | if ($path | startswith($main)) then
                     if any($layers[]; . as $layer | $path | startswith($main + $layer)) then .
                     else error("Código fuera de las capas permitidas.") end
-                  elif ($path | endswith("Test.java")) and any($test_layers[]; . as $layer | $path | startswith($test + $layer)) then .
-                  else error("La prueba unitaria debe estar en su capa y terminar en Test.java.") end
+                  elif any($test_layers[]; . as $layer | $path | startswith($test + $layer)) then .
+                  else error("Las pruebas y sus auxiliares deben estar dentro de las capas permitidas.") end
                 | if (.content | matches_package($path)) then .
                   else error("La declaración package no coincide con la ruta.") end
               )
@@ -60,7 +60,7 @@ runs:
           | . as $files
           | if any(group_by(.path)[]; length > 1) then error("Rutas duplicadas en la propuesta.") else . end
           | if all($layers[]; . as $layer | any($files[]; .path | startswith($main + $layer)))
-              and any($files[]; .path | startswith($test))
+              and any($files[]; .path | startswith($test) and endswith("Test.java"))
               and any($files[]; .path | startswith($main + "application/") and (startswith($main + "application/port/") | not))
             then .
             else error("Faltan archivos de dominio, casos de uso, puertos, adaptadores o pruebas unitarias.") end
