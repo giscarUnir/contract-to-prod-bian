@@ -66,6 +66,7 @@ jobs:
     outputs:
       mode: ${{ steps.gemini.outputs.mode }}
       model: ${{ steps.gemini.outputs.model }}
+      primary: ${{ steps.gemini.outputs.primary }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,6 +85,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_FALLBACK_MODEL: ${{ vars.GEMINI_FALLBACK_MODEL }}
         run: python3 .github/actions/gemini/propose.py service proposal/files.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.gemini.outputs.mode == 'gemini'
@@ -233,6 +235,7 @@ jobs:
               marker,
               '## Contrato a código',
               implementation,
+              proposal.model && proposal.model !== proposal.primary ? `Modelo de respaldo. Principal: \`${proposal.primary}\`.` : '',
               '',
               '| Control | Resultado |',
               '| --- | --- |',

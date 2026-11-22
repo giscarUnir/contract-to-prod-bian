@@ -16,6 +16,10 @@ INPUTS = (
 )
 
 
+class GeminiUnavailable(ValueError):
+    """Error en el que puede usarse otro modelo con la misma clave."""
+
+
 def context_for(project):
     generated = project / "target/generated-sources/openapi/src/main/java/demo/bian/generated"
     java_files = sorted(generated.rglob("*.java"))
@@ -60,11 +64,13 @@ def generate(model, api_key, context):
             result = json.load(response)
     except HTTPError as error:
         if error.code == 429:
-            raise ValueError("Gemini respondió HTTP 429. Se agotó la cuota o se alcanzó el límite de solicitudes del proyecto. "
-                             "Revisa https://aistudio.google.com/rate-limit y vuelve a ejecutar el workflow.") from None
+            raise GeminiUnavailable("HTTP 429. Se agotó la cuota o se alcanzó el límite de solicitudes. "
+                                    "Consulta https://aistudio.google.com/rate-limit.") from None
+        if error.code in {404, 500, 502, 503, 504}:
+            raise GeminiUnavailable(f"HTTP {error.code}. El modelo o el servicio no está disponible.") from None
         raise ValueError(f"Gemini respondió HTTP {error.code}. Revisa el acceso al modelo y la configuración del secreto.") from None
     except (URLError, TimeoutError):
-        raise ValueError("La conexión a Gemini falló o excedió el tiempo de espera.") from None
+        raise GeminiUnavailable("La conexión falló o excedió el tiempo de espera.") from None
 
     candidates = result.get("candidates") or []
     if not candidates or candidates[0].get("finishReason") != "STOP":
@@ -77,6 +83,19 @@ def generate(model, api_key, context):
     if len(text.encode("utf-8")) > 260_000:
         raise ValueError("La propuesta excede el límite de tamaño.")
     return proposal
+
+
+def propose(primary, fallback, api_key, context):
+    for model in {primary, fallback}:
+        if not re.fullmatch(r"gemini-[a-z0-9.-]+", model):
+            raise ValueError("Configura identificadores de modelo válidos de Gemini.")
+    try:
+        return primary, generate(primary, api_key, context)
+    except GeminiUnavailable as error:
+        if primary == fallback:
+            raise
+        print(f"::warning::{primary}: {error} Se usará el modelo de respaldo {fallback}.")
+        return fallback, generate(fallback, api_key, context)
 
 
 def main():
@@ -92,11 +111,10 @@ def main():
         print("::error::Falta el secreto GEMINI_API_KEY. No se generó el servicio.")
         return 1
 
-    model = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+    primary = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+    fallback = os.environ.get("GEMINI_FALLBACK_MODEL") or "gemini-3.5-flash-lite"
     try:
-        if not re.fullmatch(r"gemini-[a-z0-9.-]+", model):
-            raise ValueError("GEMINI_MODEL debe ser un identificador válido de Gemini.")
-        proposal = generate(model, api_key, context_for(args.project))
+        model, proposal = propose(primary, fallback, api_key, context_for(args.project))
     except (TypeError, AttributeError, json.JSONDecodeError):
         print("::error::Gemini devolvió una respuesta JSON inesperada.")
         return 1
@@ -107,7 +125,7 @@ def main():
     args.proposal.parent.mkdir(parents=True, exist_ok=True)
     args.proposal.write_text(json.dumps(proposal, ensure_ascii=False) + "\n", encoding="utf-8")
     with output.open("a", encoding="utf-8") as stream:
-        stream.write(f"mode=gemini\nmodel={model}\n")
+        stream.write(f"mode=gemini\nmodel={model}\nprimary={primary}\n")
     return 0
 
 
