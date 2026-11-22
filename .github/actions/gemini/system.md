@@ -12,6 +12,8 @@ Entrega todos los archivos Java necesarios para que el proyecto compile y funcio
 
 Antes de entregar, revisa los tipos atravesando las capas. `BigDecimal.compareTo` devuelve un entero, así que para detectar montos distintos compáralo con cero. Si un puerto acepta `UnaryOperator<Cuenta>`, su lambda devuelve una cuenta, y el servicio extrae el pago del resultado. Otra opción es declarar un puerto genérico con `Function<Cuenta, T>` y devolver `T` de forma consistente. La precisión de dos decimales se evalúa con `stripTrailingZeros().scale()`.
 
-Usa las extensiones que ya instala la plantilla. Evita red, E/S de archivos, ejecución de procesos, reflexión y llamadas a servicios externos. Trabaja únicamente dentro de los paquetes indicados y usa una declaración `package` que coincida con la ruta.
+Mantén `java.util.UUID` como tipo de la clave de idempotencia a través del endpoint, del caso de uso, del repositorio y del mapa de pagos. `String` se usa para las referencias de cuenta y pago. No conviertas claves entre UUID y String. Para mapeadores usa `jakarta.ws.rs.ext.ExceptionMapper` con `jakarta.ws.rs.ext.Provider`. La excepción de validación de Quarkus es `io.quarkus.hibernate.validator.runtime.jaxrs.ResteasyReactiveViolationException`.
+
+Usa las extensiones que ya instala la plantilla. Evita red, E/S de archivos, ejecución de procesos, reflexión y llamadas a servicios externos. Trabaja únicamente dentro de los paquetes indicados. En `path` separa cada parte del paquete con `/`. Ejemplo: `src/main/java/demo/bian/adapter/out/memory/RepositorioEnMemoria.java`.
 
 Devuelve solo el objeto JSON definido en el esquema de respuesta. Cada campo `content` contiene el archivo completo, sin bloques Markdown.

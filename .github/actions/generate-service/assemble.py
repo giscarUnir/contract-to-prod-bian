@@ -19,7 +19,7 @@ LAYERS = (
     f"{JAVA}/adapter/out/memory/",
 )
 TEST_LAYERS = tuple(f"{TEST}/{package}/" for package in ("domain", "application", "adapter"))
-JAVA_NAME = r"[a-z][a-z0-9]*(?:/[a-z][a-z0-9]*)*/[A-Z][A-Za-z0-9]*\.java"
+JAVA_PATH = re.compile(r"(src/(?:main|test)/java/demo/bian/)((?:[a-z][a-z0-9]*[./])+)([A-Z][A-Za-z0-9]*\.java)")
 
 
 def scaffold(project):
@@ -51,8 +51,11 @@ def read_proposal(proposal):
         path, content = file["path"], file["content"]
         if not isinstance(path, str) or not isinstance(content, str) or not content.strip():
             raise ValueError("Se requiere una ruta y contenido Java por archivo.")
-        if not re.fullmatch(r"src/(?:main|test)/java/demo/bian/" + JAVA_NAME, path):
+        matched = JAVA_PATH.fullmatch(path)
+        if not matched:
             raise ValueError("La propuesta contiene una ruta Java fuera del formato permitido.")
+        prefix, package_dir, filename = matched.groups()
+        path = prefix + package_dir.replace(".", "/") + filename
         if path in sources:
             raise ValueError("La propuesta contiene una ruta duplicada.")
         if path.startswith(JAVA + "/"):
