@@ -1,0 +1,14 @@
+name: Preparar proyecto Quarkus
+description: Crea el proyecto con el contrato, el build Java 25 y las pruebas HTTP independientes.
+inputs:
+  output:
+    description: Ruta del proyecto generado
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Crear el proyecto desde plantillas
+      shell: bash
+      env:
+        SERVICE_DIR: ${{ inputs.output }}
+      run: python3 .github/actions/generate-service/assemble.py scaffold "$SERVICE_DIR"
