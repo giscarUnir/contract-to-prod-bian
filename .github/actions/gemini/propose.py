@@ -1,5 +1,6 @@
-"""Solicita una sola clase Java a Gemini y escribe la propuesta como artefacto."""
+"""Solicita a Gemini la implementación y sus pruebas unitarias."""
 
+import argparse
 import json
 import os
 import re
@@ -8,29 +9,43 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-ROOT = Path(__file__).resolve().parents[1]
-CONTEXT = [
+ACTION = Path(__file__).resolve().parent
+INPUTS = (
     "contracts/bian/openapi.yaml",
     "contracts/bian/current-account.acceptance.md",
-    "src/main/java/demo/bian/application/CurrentAccounts.java",
-    "src/main/java/demo/bian/application/AccountStore.java",
-    "src/main/java/demo/bian/domain/Account.java",
-    "src/main/java/demo/bian/domain/AccountError.java",
-]
+)
 
 
-def generate(model, api_key):
-    context = "\n\n".join(f"## {name}\n{(ROOT / name).read_text(encoding='utf-8')}" for name in CONTEXT)
+def context_for(project):
+    generated = project / "target/generated-sources/openapi/src/main/java/demo/bian/generated"
+    java_files = sorted(generated.rglob("*.java"))
+    if not java_files:
+        raise ValueError("Faltan las interfaces y los modelos generados desde el contrato.")
+    sources = [project / relative for relative in INPUTS] + java_files
+    return "\n\n".join(f"## {source.relative_to(project)}\n{source.read_text(encoding='utf-8-sig')}" for source in sources)
+
+
+def generate(model, api_key, context):
     payload = {
-        "systemInstruction": {"parts": [{"text": (ROOT / "ai/system.md").read_text(encoding="utf-8")}]},
+        "systemInstruction": {"parts": [{"text": (ACTION / "system.md").read_text(encoding="utf-8")}]},
         "contents": [{"role": "user", "parts": [{"text": context}]}],
         "generationConfig": {
-            "maxOutputTokens": 8000,
+            "maxOutputTokens": 32000,
             "responseMimeType": "application/json",
             "responseJsonSchema": {
                 "type": "object",
-                "properties": {"source": {"type": "string"}},
-                "required": ["source"],
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                            "required": ["path", "content"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["files"],
                 "additionalProperties": False,
             },
         },
@@ -56,28 +71,32 @@ def generate(model, api_key):
         raise ValueError("Gemini no devolvió una propuesta completa.")
     parts = candidates[0].get("content", {}).get("parts", [])
     text = "".join(part.get("text", "") for part in parts if not part.get("thought", False))
-    source = json.loads(text).get("source")
-    if not isinstance(source, str) or not source.strip() or len(source) > 32_000:
-        raise ValueError("Gemini devolvió una clase vacía o fuera del tamaño permitido.")
-    return source
+    proposal = json.loads(text)
+    if not isinstance(proposal, dict) or not isinstance(proposal.get("files"), list) or not proposal["files"]:
+        raise ValueError("Gemini devolvió una propuesta vacía.")
+    if len(text.encode("utf-8")) > 260_000:
+        raise ValueError("La propuesta excede el límite de tamaño.")
+    return proposal
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("project", type=Path)
+    parser.add_argument("proposal", type=Path)
+    args = parser.parse_args()
     output = Path(os.environ["GITHUB_OUTPUT"])
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         with output.open("a", encoding="utf-8") as stream:
             stream.write("mode=sin-clave\n")
-        print("::notice::Falta el secreto GEMINI_API_KEY. Se comprueba la implementación de referencia.")
-        if os.environ.get("REQUIRE_GEMINI") == "true":
-            return 1
-        return 0
+        print("::error::Falta el secreto GEMINI_API_KEY. No se generó el servicio.")
+        return 1
 
     model = os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
     try:
         if not re.fullmatch(r"gemini-[a-z0-9.-]+", model):
             raise ValueError("GEMINI_MODEL debe ser un identificador válido de Gemini.")
-        source = generate(model, api_key)
+        proposal = generate(model, api_key, context_for(args.project))
     except (TypeError, AttributeError, json.JSONDecodeError):
         print("::error::Gemini devolvió una respuesta JSON inesperada.")
         return 1
@@ -85,9 +104,8 @@ def main():
         print(f"::error::{error}")
         return 1
 
-    artifact = Path("proposal/CurrentAccountService.java")
-    artifact.parent.mkdir(exist_ok=True)
-    artifact.write_text(source.rstrip() + "\n", encoding="utf-8")
+    args.proposal.parent.mkdir(parents=True, exist_ok=True)
+    args.proposal.write_text(json.dumps(proposal, ensure_ascii=False) + "\n", encoding="utf-8")
     with output.open("a", encoding="utf-8") as stream:
         stream.write(f"mode=gemini\nmodel={model}\n")
     return 0
