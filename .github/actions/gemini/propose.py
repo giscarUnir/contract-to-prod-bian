@@ -56,7 +56,7 @@ def generate(model, api_key, context):
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
     try:
-        with urlopen(request, timeout=120) as response:
+        with urlopen(request, timeout=240) as response:
             result = json.load(response)
     except HTTPError as error:
         if error.code == 429:
@@ -92,7 +92,7 @@ def main():
         print("::error::Falta el secreto GEMINI_API_KEY. No se generó el servicio.")
         return 1
 
-    model = os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
+    model = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
     try:
         if not re.fullmatch(r"gemini-[a-z0-9.-]+", model):
             raise ValueError("GEMINI_MODEL debe ser un identificador válido de Gemini.")

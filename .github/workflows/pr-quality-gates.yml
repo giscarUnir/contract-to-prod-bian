@@ -121,9 +121,13 @@ jobs:
         run: python3 .github/actions/generate-service/assemble.py apply service proposal/files.json
       - name: Compilar y ejecutar pruebas unitarias y de aceptación
         run: mvn -B -ntp -f service/pom.xml verify
+      - name: Verificar los límites de la arquitectura hexagonal
+        run: python3 .github/actions/generate-service/verify_architecture.py service
       - name: Verificar pruebas y cobertura mínima del 80%
         id: quality
         run: python3 .github/actions/generate-service/verify_quality.py service
+      - name: Levantar y probar el paquete Quarkus
+        run: python3 .github/actions/generate-service/smoke.py service
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: proyecto-validado
@@ -143,6 +147,7 @@ jobs:
             service/target/surefire-reports/
             service/target/jacoco-report/
             service/target/bom.json
+            service/target/smoke.log
           overwrite: true
 
   dependencies:
