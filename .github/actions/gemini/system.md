@@ -12,7 +12,11 @@ Entrega todos los archivos Java necesarios para que el proyecto compile y funcio
 
 Antes de entregar, revisa los tipos atravesando las capas. `BigDecimal.compareTo` devuelve un entero, así que para detectar montos distintos compáralo con cero. Si un puerto acepta `UnaryOperator<Cuenta>`, su lambda devuelve una cuenta, y el servicio extrae el pago del resultado. Otra opción es declarar un puerto genérico con `Function<Cuenta, T>` y devolver `T` de forma consistente. La precisión de dos decimales se evalúa con `stripTrailingZeros().scale()`.
 
-Mantén `java.util.UUID` como tipo de la clave de idempotencia a través del endpoint, del caso de uso, del repositorio y del mapa de pagos. `String` se usa para las referencias de cuenta y pago. No conviertas claves entre UUID y String. Para mapeadores usa `jakarta.ws.rs.ext.ExceptionMapper` con `jakarta.ws.rs.ext.Provider`. La excepción de validación de Quarkus es `io.quarkus.hibernate.validator.runtime.jaxrs.ResteasyReactiveViolationException`.
+Mantén `java.util.UUID` como tipo de la clave de idempotencia a través del endpoint, del caso de uso, del repositorio y del mapa de pagos. `String` se usa para las referencias de cuenta y pago. No conviertas claves entre UUID y String.
+
+En los DTO, asigna las constantes Java generadas de estado mediante un `switch` explícito. `AccountStatusEnum.ACTIVE` serializa como `"Active"` y `PaymentStatusEnum.REGISTERED` serializa como `"Registered"`. El método `fromValue` compara el texto JSON literalmente y no admite `"ACTIVE"` ni `"REGISTERED"`.
+
+Para mapeadores usa `jakarta.ws.rs.ext.ExceptionMapper` con `jakarta.ws.rs.ext.Provider`. La excepción de validación de Quarkus es `io.quarkus.hibernate.validator.runtime.jaxrs.ResteasyReactiveViolationException`. El mapper de `WebApplicationException` debe reconstruir las respuestas 400 con Content-Type JSON y el código `SOLICITUD_INVALIDA`, aunque la excepción no tenga cuerpo. Para otros estados, conserva la respuesta original.
 
 Usa las extensiones que ya instala la plantilla. Evita red, E/S de archivos, ejecución de procesos, reflexión y llamadas a servicios externos. Trabaja únicamente dentro de los paquetes indicados. En `path` separa cada parte del paquete con `/`. Ejemplo: `src/main/java/demo/bian/adapter/out/memory/RepositorioEnMemoria.java`.
 
