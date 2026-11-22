@@ -155,6 +155,7 @@ jobs:
   dependencies:
     name: Dependencias y SBOM
     needs: verify
+    if: "!cancelled() && needs.verify.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
@@ -163,6 +164,7 @@ jobs:
           name: calidad
           path: calidad
       - name: OSV-Scanner
+        shell: bash
         run: |
           curl --fail --silent --show-error --location -o "$RUNNER_TEMP/osv-scanner" \
             https://github.com/google/osv-scanner/releases/download/v2.7.1/osv-scanner_linux_amd64

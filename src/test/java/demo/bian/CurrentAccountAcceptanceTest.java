@@ -100,6 +100,9 @@ class CurrentAccountAcceptanceTest {
         given().contentType(JSON).body(Map.of("AccountCurrency", "PEN"))
                 .post(ACCOUNTS + "/Initiate").then().statusCode(400)
                 .body("code", equalTo("SOLICITUD_INVALIDA"));
+        given().contentType(JSON).body(Map.of("CustomerReference", "DEMO", "AccountCurrency", "EUR"))
+                .post(ACCOUNTS + "/Initiate").then().statusCode(400)
+                .body("code", equalTo("SOLICITUD_INVALIDA"));
         String id = open(100);
         given().contentType(JSON).body(Map.of("PaymentAmount", 1, "PaymentCurrency", "PEN", "PayeeReference", "DEMO"))
                 .header("Idempotency-Key", "inválido").post(PAY, id).then().statusCode(400)
