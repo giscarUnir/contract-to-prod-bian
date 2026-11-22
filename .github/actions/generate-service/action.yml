@@ -10,5 +10,16 @@ runs:
     - name: Crear el proyecto desde plantillas
       shell: bash
       env:
+        ACTION_DIR: ${{ github.action_path }}
         SERVICE_DIR: ${{ inputs.output }}
-      run: python3 .github/actions/generate-service/assemble.py scaffold "$SERVICE_DIR"
+      run: |
+        mkdir -- "$SERVICE_DIR"
+        install -Dm644 "$ACTION_DIR/template/pom.xml" "$SERVICE_DIR/pom.xml"
+        install -Dm644 "$ACTION_DIR/template/application.properties" "$SERVICE_DIR/src/main/resources/application.properties"
+        install -Dm644 "$ACTION_DIR/template/README.md" "$SERVICE_DIR/README.md"
+        install -Dm644 "$ACTION_DIR/template/LICENSE" "$SERVICE_DIR/LICENSE"
+        install -Dm644 "$ACTION_DIR/acceptance/CurrentAccountAcceptanceTest.java" \
+          "$SERVICE_DIR/src/test/java/demo/bian/CurrentAccountAcceptanceTest.java"
+        for contract in openapi.yaml current-account.acceptance.md; do
+          install -Dm644 "$GITHUB_WORKSPACE/contracts/bian/$contract" "$SERVICE_DIR/contracts/bian/$contract"
+        done

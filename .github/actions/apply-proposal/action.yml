@@ -1,0 +1,81 @@
+name: Incorporar el código generado
+description: Valida todas las rutas, los paquetes y las capas antes de escribir el código Java.
+inputs:
+  project:
+    description: Directorio del proyecto Quarkus
+    required: true
+  proposal:
+    description: Archivo JSON entregado por Gemini
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Aplicar únicamente archivos Java permitidos
+      shell: bash
+      env:
+        SERVICE_DIR: ${{ inputs.project }}
+        PROPOSAL: ${{ inputs.proposal }}
+      run: |
+        if [[ ! -f "$PROPOSAL" ]] || (( $(wc -c < "$PROPOSAL") > 280000 )); then
+          echo '::error::Falta la propuesta o supera el límite de tamaño.'
+          exit 1
+        fi
+        normalized="$(mktemp)"
+        trap 'rm -f -- "$normalized"' EXIT
+        jq -e '
+          def normalize:
+            "^(?<prefix>src/(?:main|test)/java/demo/bian/)(?<dir>(?:[a-z][a-z0-9]*[./])+)(?<file>[A-Z][A-Za-z0-9]*\\.java)\\z" as $pattern
+            | if test($pattern) then
+                capture($pattern) | .prefix + (.dir | gsub("[.]"; "/")) + .file
+              else
+                error("Ruta Java fuera del formato permitido.")
+              end;
+
+          def matches_package($path):
+            ($path | split("/") | .[3:-1] | join("[.]")) as $package
+            | test("(^|\\n)package[[:space:]]+" + $package + "[[:space:]]*;");
+
+          "src/main/java/demo/bian/" as $main
+          | "src/test/java/demo/bian/" as $test
+          | ["domain/", "application/port/in/", "application/port/out/", "application/", "adapter/in/rest/", "adapter/out/memory/"] as $layers
+          | ["domain/", "application/", "adapter/"] as $test_layers
+          | if (.files | type != "array" or length < 4 or length > 45) then
+              error("La propuesta debe incluir entre 4 y 45 archivos Java.")
+            else
+              .files | map(
+                if (.path | type != "string") or (.content | if type == "string" then (test("[^[:space:]]") | not) else true end) then
+                  error("Cada archivo necesita una ruta y contenido Java.")
+                else . end
+                | .path |= normalize
+                | .path as $path
+                | if ($path | startswith($main)) then
+                    if any($layers[]; . as $layer | $path | startswith($main + $layer)) then .
+                    else error("Código fuera de las capas permitidas.") end
+                  elif any($test_layers[]; . as $layer | $path | startswith($test + $layer)) then .
+                  else error("Las pruebas y sus auxiliares deben estar dentro de las capas permitidas.") end
+                | if (.content | matches_package($path)) then .
+                  else error("La declaración package no coincide con la ruta.") end
+              )
+            end
+          | . as $files
+          | if any(group_by(.path)[]; length > 1) then error("Rutas duplicadas en la propuesta.") else . end
+          | if all($layers[]; . as $layer | any($files[]; .path | startswith($main + $layer)))
+              and any($files[]; .path | startswith($test) and endswith("Test.java"))
+              and any($files[]; .path | startswith($main + "application/") and (startswith($main + "application/port/") | not))
+            then .
+            else error("Faltan archivos de dominio, casos de uso, puertos, adaptadores o pruebas unitarias.") end
+        ' "$PROPOSAL" > "$normalized"
+
+        while IFS= read -r path; do
+          destination="$SERVICE_DIR/$path"
+          mkdir -p -- "$(dirname -- "$destination")"
+          if [[ -e "$destination" || -L "$destination" ]]; then
+            echo '::error::La propuesta intenta sobrescribir un archivo del proyecto.'
+            exit 1
+          fi
+          (
+            set -o noclobber
+            jq -br --arg path "$path" '.[] | select(.path == $path) | .content | sub("[[:space:]]+\\z"; "")' \
+              "$normalized" > "$destination"
+          )
+        done < <(jq -br '.[].path' "$normalized")

@@ -1,0 +1,164 @@
+name: Generar la implementación con Gemini
+description: Envía el contrato a Gemini y guarda la propuesta estructurada.
+inputs:
+  project:
+    description: Proyecto con las interfaces OpenAPI generadas
+    required: true
+  proposal:
+    description: Ruta de salida de la propuesta JSON
+    required: true
+  api-key:
+    description: Secreto de Gemini
+    required: false
+outputs:
+  mode:
+    description: Estado de la generación
+    value: ${{ steps.generate.outputs.mode }}
+  model:
+    description: Modelo que generó la propuesta
+    value: ${{ steps.generate.outputs.model }}
+  primary:
+    description: Primer modelo configurado
+    value: ${{ steps.generate.outputs.primary }}
+runs:
+  using: composite
+  steps:
+    - name: Solicitar el código y sus pruebas unitarias
+      id: generate
+      shell: bash
+      env:
+        ACTION_DIR: ${{ github.action_path }}
+        SERVICE_DIR: ${{ inputs.project }}
+        PROPOSAL: ${{ inputs.proposal }}
+        GEMINI_API_KEY: ${{ inputs.api-key }}
+      run: |
+        if [[ -z "$GEMINI_API_KEY" ]]; then
+          echo 'mode=sin-clave' >> "$GITHUB_OUTPUT"
+          echo '::error::Falta GEMINI_API_KEY. No se generó el servicio.'
+          exit 1
+        fi
+
+        scratch="$(mktemp -d)"
+        trap 'rm -f -- "$scratch"/{context,request,response,chunks,text}; rmdir -- "$scratch"' EXIT
+        models=(gemini-4-hydrogen gemini-3.8-flash gemini-3.5-flash-lite)
+        shopt -s globstar nullglob
+        generated=("$SERVICE_DIR"/target/generated-sources/openapi/src/main/java/demo/bian/generated/**/*.java)
+        if (( ${#generated[@]} == 0 )); then
+          echo '::error::Faltan las interfaces y los modelos generados desde el contrato.'
+          exit 1
+        fi
+        for file in "$SERVICE_DIR"/contracts/bian/{openapi.yaml,current-account.acceptance.md} "${generated[@]}"; do
+          printf '\n## %s\n' "${file#"$SERVICE_DIR"/}"
+          cat -- "$file"
+        done > "$scratch/context"
+
+        request_model() {
+          local model="$1" endpoint=generateContent timeout=120 streaming=false
+          local status finish attempt candidate
+          if [[ "$model" == gemini-4-hydrogen ]]; then
+            endpoint='streamGenerateContent?alt=sse'
+            timeout=165
+            streaming=true
+          fi
+          jq -n --rawfile prompt "$ACTION_DIR/system.md" --rawfile context "$scratch/context" \
+            --argjson streaming "$streaming" '
+              {
+                systemInstruction: {parts: [{text: $prompt}]},
+                contents: [{role: "user", parts: [{text: $context}]}],
+                generationConfig: {
+                  maxOutputTokens: 32000,
+                  responseMimeType: "application/json",
+                  responseJsonSchema: {
+                    type: "object", required: ["files"], additionalProperties: false,
+                    properties: {files: {type: "array", items: {
+                      type: "object", required: ["path", "content"], additionalProperties: false,
+                      properties: {path: {type: "string"}, content: {type: "string"}}
+                    }}}
+                  }
+                }
+              }
+              | if $streaming then
+                  .generationConfig += {maxOutputTokens: 48000, thinkingConfig: {thinkingLevel: "MEDIUM"}}
+                else . end
+            ' > "$scratch/request" || return 1
+
+          echo "Solicitando el microservicio a $model."
+          for attempt in 1 2; do
+            if ! status=$(curl -sS --no-buffer --connect-timeout 15 --max-time "$timeout" \
+              --output "$scratch/response" --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' --header @- \
+              --data-binary "@$scratch/request" \
+              "https://generativelanguage.googleapis.com/v1beta/models/$model:$endpoint" \
+              <<< "x-goog-api-key: $GEMINI_API_KEY"); then
+              echo "::warning::$model: La conexión falló o excedió el tiempo de espera."
+              return 75
+            fi
+            case "$status" in
+              200) break ;;
+              500|502|503|504)
+                echo "::warning::$model devolvió HTTP $status."
+                if (( attempt == 2 )); then return 75; fi
+                sleep 6
+                ;;
+              429)
+                echo "::warning::$model alcanzó su cuota (HTTP 429). Consulta https://aistudio.google.com/rate-limit."
+                return 75
+                ;;
+              404)
+                echo "::warning::$model no está disponible (HTTP 404)."
+                return 75
+                ;;
+              *)
+                echo "::error::$model respondió HTTP $status. Revisa el acceso y la configuración del secreto."
+                return 1
+                ;;
+            esac
+          done
+
+          if [[ "$streaming" == true ]]; then
+            jq -Rn '[inputs | select(startswith("data:")) | sub("^data:[ ]*"; "") |
+              sub("\\r$"; "") | select(. != "" and . != "[DONE]") | fromjson]' \
+              "$scratch/response" > "$scratch/chunks" 2>/dev/null || return 75
+          else
+            jq -s . "$scratch/response" > "$scratch/chunks" 2>/dev/null || return 1
+          fi
+          if jq -e 'any(.[]; has("error"))' "$scratch/chunks" > /dev/null; then
+            echo "::warning::$model interrumpió la respuesta."
+            return 75
+          fi
+          finish=$(jq -br '[.[] | .candidates[]? | .finishReason // empty] | last // ""' "$scratch/chunks") || return 1
+          if [[ "$streaming" == true && -z "$finish" ]]; then
+            echo "::warning::$model cerró la respuesta antes de completarla."
+            return 75
+          fi
+          if [[ "$finish" != STOP ]]; then
+            echo '::error::Gemini no devolvió una propuesta completa.'
+            return 1
+          fi
+
+          jq -brj '[.[] | .candidates[]? | .content.parts[]? | select(.thought != true) | .text // empty] | join("")' \
+            "$scratch/chunks" > "$scratch/text" || return 1
+          if (( $(wc -c < "$scratch/text") > 260000 )); then
+            echo '::error::La propuesta excede el límite de tamaño.'
+            return 1
+          fi
+          if ! candidate=$(jq -bec 'select(type == "object" and (.files | type == "array" and length > 0))' \
+            "$scratch/text" 2>/dev/null); then
+            echo '::error::Gemini devolvió una propuesta vacía o JSON inesperado.'
+            return 1
+          fi
+          mkdir -p -- "$(dirname -- "$PROPOSAL")" || return 1
+          printf '%s\n' "$candidate" > "$PROPOSAL"
+        }
+
+        for model in "${models[@]}"; do
+          if request_model "$model"; then
+            printf 'mode=gemini\nmodel=%s\nprimary=%s\n' "$model" "${models[0]}" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            code=$?
+            if (( code != 75 )); then exit "$code"; fi
+          fi
+        done
+        echo '::error::Ninguno de los modelos configurados estuvo disponible.'
+        exit 1
