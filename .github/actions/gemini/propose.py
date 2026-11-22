@@ -45,7 +45,7 @@ def read_chunks(response, streaming):
 def request_proposal(request, streaming):
     for attempt in range(2):
         try:
-            with urlopen(request, timeout=120) as response:
+            with urlopen(request, timeout=165 if streaming else 120) as response:
                 text, finish = [], None
                 for chunk in read_chunks(response, streaming):
                     if "error" in chunk:
