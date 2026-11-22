@@ -1,0 +1,123 @@
+name: Verificar el microservicio generado
+description: Comprueba las dependencias de arquitectura, las pruebas, la cobertura y el paquete ejecutable.
+inputs:
+  project:
+    description: Directorio del proyecto Quarkus
+    required: true
+outputs:
+  tests:
+    description: Número de pruebas HTTP ejecutadas
+    value: ${{ steps.quality.outputs.tests }}
+  unit:
+    description: Número de pruebas unitarias ejecutadas
+    value: ${{ steps.quality.outputs.unit }}
+  coverage:
+    description: Cobertura de líneas del dominio y la aplicación
+    value: ${{ steps.quality.outputs.coverage }}
+runs:
+  using: composite
+  steps:
+    - name: Comprobar las dependencias entre capas
+      shell: bash
+      env:
+        SERVICE_DIR: ${{ inputs.project }}
+      run: |
+        jdeps -verbose:class -filter:none "$SERVICE_DIR/target/classes" | awk '
+          $1 ~ /^demo[.]bian[.]/ && $2 == "->" {
+            checked++
+            if (($1 ~ /^demo[.]bian[.]domain[.]/ && $3 !~ /^java[.]/ && $3 !~ /^demo[.]bian[.]domain[.]/) ||
+                ($1 ~ /^demo[.]bian[.]application[.]/ && $3 ~ /^(demo[.]bian[.](adapter|generated)[.]|jakarta[.]ws[.]rs[.]|io[.]quarkus[.])/) ||
+                ($1 ~ /^demo[.]bian[.]adapter[.]/ && $3 ~ /^demo[.]bian[.]application[.]/ && $3 !~ /^demo[.]bian[.]application[.]port[.]/)) {
+              print "Dependencia de capa inválida: " $1 " -> " $3 > "/dev/stderr"
+              failed = 1
+            }
+          }
+          END {
+            if (!checked) { print "jdeps no encontró dependencias para verificar." > "/dev/stderr"; exit 1 }
+            if (failed) exit 1
+            print "Dependencias de dominio, aplicación, puertos y adaptadores verificadas."
+          }
+        '
+    - name: Comprobar las pruebas y exigir la cobertura mínima del 80 %
+      id: quality
+      shell: bash
+      env:
+        SERVICE_DIR: ${{ inputs.project }}
+      run: |
+        if ! command -v xmllint > /dev/null; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxml2-utils
+        fi
+        shopt -s nullglob
+        http=0
+        unit=0
+        for report in "$SERVICE_DIR"/target/surefire-reports/TEST-*.xml; do
+          name=$(xmllint --nonet --xpath 'string(/testsuite/@name)' "$report")
+          executed=$(xmllint --nonet --xpath 'sum(/testsuite/@tests) - sum(/testsuite/@skipped)' "$report")
+          case "$name" in
+            demo.bian.CurrentAccountAcceptanceTest) http=$((http + executed)) ;;
+            demo.bian.domain.*|demo.bian.application.*|demo.bian.adapter.*) unit=$((unit + executed)) ;;
+          esac
+        done
+        if (( http < 7 || unit == 0 )); then
+          echo '::error::Deben ejecutarse las siete pruebas HTTP independientes y las pruebas unitarias.'
+          exit 1
+        fi
+
+        report="$SERVICE_DIR/target/jacoco-report/jacoco.xml"
+        core='/report/package[@name="demo/bian/domain" or @name="demo/bian/application" or starts-with(@name,"demo/bian/domain/") or starts-with(@name,"demo/bian/application/")]/counter[@type="LINE"]'
+        covered=$(xmllint --nonet --xpath "sum($core/@covered)" "$report")
+        missed=$(xmllint --nonet --xpath "sum($core/@missed)" "$report")
+        total=$((covered + missed))
+        if (( total == 0 )); then
+          echo '::error::No se midió la cobertura de dominio y aplicación.'
+          exit 1
+        fi
+        coverage=$(LC_ALL=C awk -v covered="$covered" -v total="$total" 'BEGIN { printf "%.1f%%", 100 * covered / total }')
+        printf '%s pruebas unitarias, %s pruebas HTTP y %s de cobertura.\n' "$unit" "$http" "$coverage"
+        printf 'tests=%s\nunit=%s\ncoverage=%s\n' "$http" "$unit" "$coverage" >> "$GITHUB_OUTPUT"
+        if (( covered * 100 < total * 80 )); then
+          echo '::error::El mínimo exigido de cobertura es 80 %.'
+          exit 1
+        fi
+    - name: Arrancar el paquete y comprobar los endpoints
+      shell: bash
+      env:
+        SERVICE_DIR: ${{ inputs.project }}
+      run: |
+        target="$SERVICE_DIR/target"
+        base=http://127.0.0.1:18165
+        response="$(mktemp)"
+        java -Dquarkus.http.host=127.0.0.1 -Dquarkus.http.port=18165 \
+          -jar "$target/quarkus-app/quarkus-run.jar" > "$target/smoke.log" 2>&1 &
+        pid=$!
+        trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f -- "$response"' EXIT
+
+        ready=false
+        for ((attempt = 0; attempt < 40; attempt++)); do
+          if curl -fsS --max-time 2 "$base/q/health/ready" 2>/dev/null | jq -e '.status == "UP"' > /dev/null 2>&1; then
+            ready=true
+            break
+          fi
+          if ! kill -0 "$pid" 2>/dev/null; then break; fi
+          sleep 0.5
+        done
+        if [[ "$ready" != true ]]; then
+          echo '::error::El paquete Quarkus no alcanzó el estado UP.'
+          exit 1
+        fi
+
+        status=$(curl -fsS --max-time 5 --output "$response" --write-out '%{http_code}' \
+          --header 'Content-Type: application/json' \
+          --data '{"CustomerReference":"SMOKE","AccountCurrency":"PEN","InitialDepositAmount":100}' \
+          "$base/CurrentAccount/Initiate")
+        if [[ "$status" != 201 ]] || ! jq -e '.AccountBalance == 100' "$response" > /dev/null; then
+          echo '::error::El paquete ejecutable no abrió la cuenta esperada.'
+          exit 1
+        fi
+        curl -fsS --location --max-time 5 "$base/q/swagger-ui/" --output "$response"
+        if ! grep -q 'swagger-ui-bundle.js' "$response"; then
+          echo '::error::El paquete no sirve Swagger UI.'
+          exit 1
+        fi
+        echo 'Paquete Quarkus listo. Apertura de cuenta y Swagger UI verificadas.'

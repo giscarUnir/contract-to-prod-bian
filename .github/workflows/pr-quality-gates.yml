@@ -82,9 +82,11 @@ jobs:
         run: mvn -B -ntp -f service/pom.xml generate-sources
       - name: Solicitar implementación y pruebas unitarias completas
         id: gemini
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python3 .github/actions/gemini/propose.py service proposal/files.json
+        uses: ./.github/actions/gemini
+        with:
+          project: service
+          proposal: proposal/files.json
+          api-key: ${{ secrets.GEMINI_API_KEY }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.gemini.outputs.mode == 'gemini'
         with:
@@ -118,16 +120,17 @@ jobs:
         with:
           output: service
       - name: Incorporar las capas y las pruebas generadas
-        run: python3 .github/actions/generate-service/assemble.py apply service proposal/files.json
+        uses: ./.github/actions/apply-proposal
+        with:
+          project: service
+          proposal: proposal/files.json
       - name: Compilar y ejecutar pruebas unitarias y de aceptación
         run: mvn -B -ntp -f service/pom.xml verify
-      - name: Verificar los límites de la arquitectura hexagonal
-        run: python3 .github/actions/generate-service/verify_architecture.py service
-      - name: Verificar pruebas y cobertura mínima del 80%
+      - name: Verificar arquitectura, pruebas, cobertura y arranque
         id: quality
-        run: python3 .github/actions/generate-service/verify_quality.py service
-      - name: Levantar y probar el paquete Quarkus
-        run: python3 .github/actions/generate-service/smoke.py service
+        uses: ./.github/actions/verify-service
+        with:
+          project: service
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: proyecto-validado
