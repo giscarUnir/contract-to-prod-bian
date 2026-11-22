@@ -1,0 +1,230 @@
+name: Contrato a código
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-to-code-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Contrato y compatibilidad
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Spectral
+        run: npx --yes --package=@stoplight/spectral-cli@6.17.1 spectral lint --ruleset .spectral.yaml --fail-severity warn contracts/bian/openapi.yaml
+      - name: Obtener el contrato base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git show "${BASE_SHA}:contracts/bian/openapi.yaml" > base-contract.yaml
+      - name: Bloquear cambios incompatibles
+        if: github.event_name == 'pull_request'
+        uses: oasdiff/oasdiff-action/breaking@14ca7009a63c417dfe27b7c44359c4bcccaf8eee # v0.2.1
+        with:
+          base: base-contract.yaml
+          revision: contracts/bian/openapi.yaml
+          fail-on: ERR
+          review: 'false'
+
+  secrets:
+    name: Escaneo de secretos
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Gitleaks
+        run: |
+          curl --fail --silent --show-error --location -o "$RUNNER_TEMP/gitleaks.tgz" \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all .
+
+  propose:
+    name: Propuesta de Gemini
+    needs: [contract, secrets]
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.gemini.outputs.mode }}
+      model: ${{ steps.gemini.outputs.model }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Solicitar la clase de aplicación
+        id: gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          REQUIRE_GEMINI: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python3 ai/propose.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.gemini.outputs.mode == 'gemini'
+        with:
+          name: propuesta-gemini
+          path: proposal/CurrentAccountService.java
+          if-no-files-found: error
+          overwrite: true
+
+  verify:
+    name: Compilación y aceptación HTTP
+    needs: [contract, secrets, propose]
+    if: >-
+      !cancelled() && needs.contract.result == 'success' && needs.secrets.result == 'success' &&
+      (needs.propose.result == 'success' || needs.propose.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      tests: ${{ steps.quality.outputs.tests }}
+      coverage: ${{ steps.quality.outputs.coverage }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.propose.outputs.mode == 'gemini'
+        with:
+          name: propuesta-gemini
+          path: proposal
+      - name: Preparar la implementación propuesta
+        if: needs.propose.outputs.mode == 'gemini'
+        run: install -m 644 proposal/CurrentAccountService.java src/main/java/demo/bian/application/CurrentAccountService.java
+      - name: Generar, compilar y ejecutar pruebas de aceptación
+        run: mvn -B -ntp verify
+      - name: Resumir pruebas y exigir cobertura de dominio y aplicación
+        id: quality
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          import os
+
+          suites = [ET.parse(p).getroot() for p in Path("target/surefire-reports").glob("TEST-*.xml")]
+          tests = sum(int(suite.attrib["tests"]) - int(suite.attrib.get("skipped", 0)) for suite in suites)
+          if not tests:
+              raise SystemExit("No se ejecutaron las pruebas de aceptación.")
+
+          report = ET.parse("target/jacoco-report/jacoco.xml")
+          packages = {"demo/bian/domain", "demo/bian/application"}
+          lines = [counter for package in report.findall("package") if package.attrib["name"] in packages
+                   for counter in package.findall("counter") if counter.attrib["type"] == "LINE"]
+          covered = sum(int(line.attrib["covered"]) for line in lines)
+          total = covered + sum(int(line.attrib["missed"]) for line in lines)
+          if not total:
+              raise SystemExit("No se midió la cobertura de dominio y aplicación.")
+
+          coverage = 100 * covered / total
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"tests={tests}", f"coverage={coverage:.1f}%", sep="\n", file=output)
+          if coverage < 80:
+              raise SystemExit(f"Cobertura de dominio y aplicación: {coverage:.1f}%, por debajo de 80%.")
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: calidad
+          path: |
+            target/surefire-reports/
+            target/jacoco-report/
+            target/bom.json
+          overwrite: true
+
+  dependencies:
+    name: Dependencias y SBOM
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: calidad
+          path: calidad
+      - name: OSV-Scanner
+        run: |
+          curl --fail --silent --show-error --location -o "$RUNNER_TEMP/osv-scanner" \
+            https://github.com/google/osv-scanner/releases/download/v2.7.1/osv-scanner_linux_amd64
+          echo "fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8  $RUNNER_TEMP/osv-scanner" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+          "$RUNNER_TEMP/osv-scanner" scan source -L calidad/bom.json --format=json | tee osv-report.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: seguridad-dependencias
+          path: osv-report.json
+          overwrite: true
+
+  report:
+    name: Informe del PR
+    needs: [contract, secrets, propose, verify, dependencies]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const jobs = JSON.parse(process.env.RESULTS);
+            const marker = '<!-- contract-to-code -->';
+            const status = { success: 'Correcto', failure: 'Falló', skipped: 'Omitido', cancelled: 'Cancelado' };
+            const proposal = jobs.propose.outputs;
+            const metrics = jobs.verify.outputs;
+            const stages = [
+              ['Spectral y compatibilidad', jobs.contract.result],
+              ['Escaneo de secretos', jobs.secrets.result],
+              ['Propuesta de Gemini', proposal.mode === 'sin-clave' ? 'skipped' : jobs.propose.result],
+              ['Compilación y aceptación HTTP', jobs.verify.result],
+              ['Dependencias y SBOM', jobs.dependencies.result],
+            ];
+            const implementation = proposal.mode === 'gemini' ? `Propuesta de \`${proposal.model}\``
+              : jobs.propose.result === 'failure' ? 'Gemini falló. No se verificó una implementación.'
+              : proposal.mode === 'sin-clave' ? 'Referencia versionada. Falta configurar \`GEMINI_API_KEY\`.'
+              : 'Referencia versionada.';
+            const run = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              '## Contrato a código',
+              implementation,
+              '',
+              '| Control | Resultado |',
+              '| --- | --- |',
+              ...stages.map(([label, result]) => `| ${label} | ${status[result]} |`),
+              '',
+              metrics.tests ? `Pruebas HTTP ejecutadas: **${metrics.tests}**. Cobertura de dominio y aplicación: **${metrics.coverage}**.` : '',
+              `[Ver ejecución y evidencias](${run})`,
+            ].join('\n');
+            await core.summary.addRaw(body, true).write();
+
+            const pr = context.payload.pull_request;
+            if (!pr || pr.head.repo.full_name !== process.env.GITHUB_REPOSITORY) return;
+            const params = { ...context.repo, issue_number: pr.number };
+            const comments = await github.paginate(github.rest.issues.listComments, params);
+            const previous = comments.find(comment => comment.user?.login === 'github-actions[bot]' && comment.body?.startsWith(marker));
+            if (previous) await github.rest.issues.updateComment({ ...context.repo, comment_id: previous.id, body });
+            else await github.rest.issues.createComment({ ...params, body });

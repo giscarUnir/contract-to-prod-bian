@@ -1,0 +1,24 @@
+extends:
+  - spectral:oas
+rules:
+  info-license: 'off'
+  operation-description: 'off'
+  contact-properties: 'off'
+  oas3-api-servers: 'off'
+  oas3-valid-media-example: error
+  bian-service-domain:
+    description: Identifica el Service Domain BIAN del contrato.
+    severity: error
+    given: $.info
+    then:
+      field: x-bian-service-domain
+      function: truthy
+  bian-action-term:
+    description: Cada operación declara su Action Term BIAN.
+    severity: error
+    given: "$.paths[*][get,post,put,patch,delete]"
+    then:
+      field: x-bian-action-term
+      function: enumeration
+      functionOptions:
+        values: [Initiate, Retrieve, Control, Update, Execute, Request]

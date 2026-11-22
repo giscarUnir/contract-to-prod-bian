@@ -1,0 +1,283 @@
+openapi: 3.0.3
+info:
+  title: Current Account (BIAN) - Demo
+  description: |
+    Contrato FICTICIO alineado al modelo BIAN, Service Domain "Current Account"
+    (Control Record: Current Account Facility). Esquemas simplificados con fines
+    de demostración; no es una implementación certificada de BIAN.
+  version: 1.0.0
+  contact:
+    name: Arquitectura (demo)
+  x-bian-service-domain: CurrentAccount
+  x-bian-version: "12.0.0"
+  x-bian-control-record: CurrentAccountFacility
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: CurrentAccountFacility
+    description: Control Record - la cuenta corriente
+  - name: Payments
+    description: Behavior Qualifier - pagos cargados a la cuenta
+paths:
+  /CurrentAccount/Initiate:
+    post:
+      tags: [CurrentAccountFacility]
+      operationId: initiateCurrentAccountFacility
+      summary: Initiate - abre una nueva cuenta corriente
+      x-bian-action-term: Initiate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CurrentAccountFacilityInitiate'
+      responses:
+        '201':
+          description: Cuenta abierta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentAccountFacility'
+              example:
+                CurrentAccountFacilityReference: CA-0011223344
+                CustomerReference: CUST-000123
+                AccountCurrency: PEN
+                AccountStatus: Active
+                AccountBalance: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /CurrentAccount/{currentaccountid}/Retrieve:
+    get:
+      tags: [CurrentAccountFacility]
+      operationId: retrieveCurrentAccountFacility
+      summary: Retrieve - consulta la cuenta y su saldo
+      x-bian-action-term: Retrieve
+      parameters:
+        - $ref: '#/components/parameters/currentaccountid'
+      responses:
+        '200':
+          description: Cuenta encontrada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentAccountFacility'
+              example:
+                CurrentAccountFacilityReference: CA-0011223344
+                CustomerReference: CUST-000123
+                AccountCurrency: PEN
+                AccountStatus: Active
+                AccountBalance: 1500.5
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /CurrentAccount/{currentaccountid}/Control:
+    put:
+      tags: [CurrentAccountFacility]
+      operationId: controlCurrentAccountFacility
+      summary: Control - suspende o reactiva la cuenta
+      x-bian-action-term: Control
+      parameters:
+        - $ref: '#/components/parameters/currentaccountid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlRequest'
+      responses:
+        '200':
+          description: Estado actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentAccountFacility'
+              example:
+                CurrentAccountFacilityReference: CA-0011223344
+                CustomerReference: CUST-000123
+                AccountCurrency: PEN
+                AccountStatus: Suspended
+                AccountBalance: 1500.5
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/BusinessRule'
+  /CurrentAccount/{currentaccountid}/Payments/Initiate:
+    post:
+      tags: [Payments]
+      operationId: initiateCurrentAccountPayments
+      summary: Initiate - registra un pago con cargo a la cuenta
+      x-bian-action-term: Initiate
+      x-bian-behavior-qualifier: Payments
+      parameters:
+        - $ref: '#/components/parameters/currentaccountid'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentsInitiate'
+      responses:
+        '201':
+          description: Pago registrado. Repetir la misma solicitud con la misma clave devuelve el pago registrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payments'
+              example:
+                PaymentsReference: PAY-9f1c2a
+                PaymentAmount: 250.0
+                PaymentCurrency: PEN
+                PayeeReference: CA-0055667788
+                PaymentStatus: Registered
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/BusinessRule'
+  /CurrentAccount/{currentaccountid}/Payments/{paymentsid}/Retrieve:
+    get:
+      tags: [Payments]
+      operationId: retrieveCurrentAccountPayments
+      summary: Retrieve - consulta un pago de la cuenta
+      x-bian-action-term: Retrieve
+      x-bian-behavior-qualifier: Payments
+      parameters:
+        - $ref: '#/components/parameters/currentaccountid'
+        - name: paymentsid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pago encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payments'
+              example:
+                PaymentsReference: PAY-9f1c2a
+                PaymentAmount: 250.0
+                PaymentCurrency: PEN
+                PayeeReference: CA-0055667788
+                PaymentStatus: Completed
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    currentaccountid:
+      name: currentaccountid
+      in: path
+      required: true
+      description: Referencia de la instancia del Control Record
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Clave por cuenta. Reutilizarla con un monto, moneda o beneficiario distintos devuelve 422.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No existe
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BusinessRule:
+      description: Regla de negocio no cumplida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    CurrentAccountFacilityInitiate:
+      type: object
+      required: [CustomerReference, AccountCurrency]
+      properties:
+        CustomerReference:
+          type: string
+          minLength: 1
+        AccountCurrency:
+          $ref: '#/components/schemas/Currency'
+        InitialDepositAmount:
+          type: number
+          minimum: 0
+          multipleOf: 0.01
+          description: Depósito inicial opcional (por defecto 0)
+    CurrentAccountFacility:
+      type: object
+      required: [CurrentAccountFacilityReference, AccountCurrency, AccountStatus]
+      properties:
+        CurrentAccountFacilityReference:
+          type: string
+        CustomerReference:
+          type: string
+        AccountCurrency:
+          $ref: '#/components/schemas/Currency'
+        AccountStatus:
+          type: string
+          enum: [Active, Suspended, Closed]
+        AccountBalance:
+          type: number
+    ControlRequest:
+      type: object
+      required: [ControlActionType]
+      properties:
+        ControlActionType:
+          type: string
+          enum: [Suspend, Resume]
+        ControlActionReason:
+          type: string
+          maxLength: 140
+    PaymentsInitiate:
+      type: object
+      required: [PaymentAmount, PaymentCurrency, PayeeReference]
+      properties:
+        PaymentAmount:
+          type: number
+          minimum: 0.01
+          multipleOf: 0.01
+        PaymentCurrency:
+          $ref: '#/components/schemas/Currency'
+        PayeeReference:
+          type: string
+          minLength: 1
+    Payments:
+      type: object
+      required: [PaymentsReference, PaymentStatus]
+      properties:
+        PaymentsReference:
+          type: string
+        PaymentAmount:
+          type: number
+        PaymentCurrency:
+          $ref: '#/components/schemas/Currency'
+        PayeeReference:
+          type: string
+        PaymentStatus:
+          type: string
+          enum: [Registered, Completed, Rejected]
+    Currency:
+      type: string
+      enum: [PEN, USD]
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
