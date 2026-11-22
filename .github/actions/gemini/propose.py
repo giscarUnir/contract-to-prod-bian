@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -14,6 +13,7 @@ INPUTS = (
     "contracts/bian/openapi.yaml",
     "contracts/bian/current-account.acceptance.md",
 )
+MODEL_ORDER = ("gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite")
 
 
 class GeminiUnavailable(ValueError):
@@ -34,7 +34,7 @@ def generate(model, api_key, context):
         "systemInstruction": {"parts": [{"text": (ACTION / "system.md").read_text(encoding="utf-8")}]},
         "contents": [{"role": "user", "parts": [{"text": context}]}],
         "generationConfig": {
-            "maxOutputTokens": 32000,
+            "maxOutputTokens": 48000 if model == "gemini-4-hydrogen" else 32000,
             "responseMimeType": "application/json",
             "responseJsonSchema": {
                 "type": "object",
@@ -60,7 +60,7 @@ def generate(model, api_key, context):
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
     )
     try:
-        with urlopen(request, timeout=240) as response:
+        with urlopen(request, timeout=180) as response:
             result = json.load(response)
     except HTTPError as error:
         if error.code == 429:
@@ -85,17 +85,14 @@ def generate(model, api_key, context):
     return proposal
 
 
-def propose(primary, fallback, api_key, context):
-    for model in {primary, fallback}:
-        if not re.fullmatch(r"gemini-[a-z0-9.-]+", model):
-            raise ValueError("Configura identificadores de modelo válidos de Gemini.")
-    try:
-        return primary, generate(primary, api_key, context)
-    except GeminiUnavailable as error:
-        if primary == fallback:
-            raise
-        print(f"::warning::{primary}: {error} Se usará el modelo de respaldo {fallback}.")
-        return fallback, generate(fallback, api_key, context)
+def propose(api_key, context):
+    for model, next_model in zip(MODEL_ORDER, MODEL_ORDER[1:]):
+        try:
+            return model, generate(model, api_key, context)
+        except GeminiUnavailable as error:
+            print(f"::warning::{model}: {error} Se intentará con {next_model}.")
+    model = MODEL_ORDER[-1]
+    return model, generate(model, api_key, context)
 
 
 def main():
@@ -111,10 +108,8 @@ def main():
         print("::error::Falta el secreto GEMINI_API_KEY. No se generó el servicio.")
         return 1
 
-    primary = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
-    fallback = os.environ.get("GEMINI_FALLBACK_MODEL") or "gemini-3.5-flash-lite"
     try:
-        model, proposal = propose(primary, fallback, api_key, context_for(args.project))
+        model, proposal = propose(api_key, context_for(args.project))
     except (TypeError, AttributeError, json.JSONDecodeError):
         print("::error::Gemini devolvió una respuesta JSON inesperada.")
         return 1
@@ -125,7 +120,7 @@ def main():
     args.proposal.parent.mkdir(parents=True, exist_ok=True)
     args.proposal.write_text(json.dumps(proposal, ensure_ascii=False) + "\n", encoding="utf-8")
     with output.open("a", encoding="utf-8") as stream:
-        stream.write(f"mode=gemini\nmodel={model}\nprimary={primary}\n")
+        stream.write(f"mode=gemini\nmodel={model}\nprimary={MODEL_ORDER[0]}\n")
     return 0
 
 

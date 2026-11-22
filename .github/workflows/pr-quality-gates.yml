@@ -62,7 +62,7 @@ jobs:
     needs: [contract, secrets]
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     outputs:
       mode: ${{ steps.gemini.outputs.mode }}
       model: ${{ steps.gemini.outputs.model }}
@@ -84,8 +84,6 @@ jobs:
         id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
-          GEMINI_FALLBACK_MODEL: ${{ vars.GEMINI_FALLBACK_MODEL }}
         run: python3 .github/actions/gemini/propose.py service proposal/files.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.gemini.outputs.mode == 'gemini'
