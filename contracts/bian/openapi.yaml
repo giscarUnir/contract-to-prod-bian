@@ -107,6 +107,9 @@ paths:
       tags: [Payments]
       operationId: initiateCurrentAccountPayments
       summary: Initiate - registra un pago con cargo a la cuenta
+      description: |
+        Debita el monto una sola vez por cuenta y clave de idempotencia.
+        Un reintento con los mismos datos devuelve la referencia original.
       x-bian-action-term: Initiate
       x-bian-behavior-qualifier: Payments
       parameters:
@@ -142,6 +145,9 @@ paths:
       tags: [Payments]
       operationId: retrieveCurrentAccountPayments
       summary: Retrieve - consulta un pago de la cuenta
+      description: |
+        La referencia del pago se resuelve dentro de la cuenta indicada.
+        Si el pago pertenece a otra cuenta, la API devuelve 404.
       x-bian-action-term: Retrieve
       x-bian-behavior-qualifier: Payments
       parameters:
