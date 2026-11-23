@@ -2,6 +2,7 @@ openapi: 3.0.3
 info:
   title: Current Account (BIAN) - Demo
   description: |
+    Prueba del flujo de corrección automática con Gemini.
     Contrato FICTICIO alineado al modelo BIAN, Service Domain "Current Account"
     (Control Record: Current Account Facility). Esquemas simplificados con fines
     de demostración; no es una implementación certificada de BIAN.
