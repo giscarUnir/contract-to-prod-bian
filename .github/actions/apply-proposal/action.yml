@@ -22,7 +22,8 @@ runs:
         fi
         normalized="$(mktemp)"
         trap 'rm -f -- "$normalized"' EXIT
-        jq -e '
+        validation_log="$(dirname -- "$PROPOSAL")/validation.log"
+        if ! jq -e '
           def normalize:
             "^(?<prefix>src/(?:main|test)/java/demo/bian/)(?<dir>(?:[a-z][a-z0-9]*[./])+)(?<file>[A-Z][A-Za-z0-9]*\\.java)\\z" as $pattern
             | if test($pattern) then
@@ -64,7 +65,10 @@ runs:
               and any($files[]; .path | startswith($main + "application/") and (startswith($main + "application/port/") | not))
             then .
             else error("Faltan archivos de dominio, casos de uso, puertos, adaptadores o pruebas unitarias.") end
-        ' "$PROPOSAL" > "$normalized"
+        ' "$PROPOSAL" > "$normalized" 2> "$validation_log"; then
+          cat -- "$validation_log" >&2
+          exit 1
+        fi
 
         while IFS= read -r path; do
           destination="$SERVICE_DIR/$path"

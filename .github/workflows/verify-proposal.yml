@@ -1,0 +1,127 @@
+name: Verificar una propuesta
+
+on:
+  workflow_call:
+    inputs:
+      attempt:
+        description: Identificador del intento para separar la evidencia.
+        type: string
+        required: true
+      proposal:
+        description: Nombre del artefacto con files.json.
+        type: string
+        required: true
+    outputs:
+      valid:
+        value: ${{ jobs.check.outputs.valid }}
+      tests:
+        value: ${{ jobs.check.outputs.tests }}
+      unit:
+        value: ${{ jobs.check.outputs.unit }}
+      coverage:
+        value: ${{ jobs.check.outputs.coverage }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      valid: ${{ steps.result.outputs.valid }}
+      tests: ${{ steps.quality.outputs.tests }}
+      unit: ${{ steps.quality.outputs.unit }}
+      coverage: ${{ steps.quality.outputs.coverage }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.proposal }}
+          path: proposal
+      - uses: ./.github/actions/generate-service
+        with:
+          output: service
+      - name: Incorporar las capas y las pruebas generadas
+        id: apply
+        continue-on-error: true
+        uses: ./.github/actions/apply-proposal
+        with:
+          project: service
+          proposal: proposal/files.json
+      - name: Compilar y ejecutar pruebas unitarias y de aceptación
+        id: build
+        if: steps.apply.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: mvn -B -ntp -Dstyle.color=never -f service/pom.xml verify 2>&1 | tee build.log
+      - name: Verificar arquitectura, pruebas, cobertura y arranque
+        id: quality
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        uses: ./.github/actions/verify-service
+        with:
+          project: service
+      - name: Registrar el resultado y preparar el diagnóstico
+        id: result
+        shell: bash
+        env:
+          APPLY: ${{ steps.apply.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          QUALITY: ${{ steps.quality.outcome }}
+        run: |
+          if [[ "$APPLY" == success && "$BUILD" == success && "$QUALITY" == success ]]; then
+            echo 'valid=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo 'valid=false' >> "$GITHUB_OUTPUT"
+          {
+            printf 'Incorporación: %s. Compilación y pruebas: %s. Arquitectura, cobertura y arranque: %s.\n' \
+              "$APPLY" "$BUILD" "$QUALITY"
+            if [[ "$APPLY" == failure ]]; then
+              echo 'Revisa que todas las capas y una prueba Test.java estén presentes y que las rutas coincidan con los paquetes Java.'
+              if [[ -s proposal/validation.log ]]; then cat proposal/validation.log; fi
+            elif [[ "$BUILD" == failure ]]; then
+              # Prioriza el primer diagnóstico de Maven y limita la evidencia que lee Gemini.
+              awk '/^\[ERROR\]/ && count++ < 45 { print substr($0, 1, 500) }' build.log
+            else
+              echo 'Revisa las dependencias de la arquitectura hexagonal, el mínimo de cobertura del 80 % y los endpoints en el JAR.'
+            fi
+          } > feedback.txt
+          echo '::notice::La propuesta necesita corrección. El resultado final controla la entrega.'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.result.outputs.valid == 'false'
+        with:
+          name: diagnostico-${{ inputs.attempt }}
+          path: feedback.txt
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.result.outputs.valid == 'true'
+        with:
+          name: proyecto-validado-${{ inputs.attempt }}
+          path: |
+            service/pom.xml
+            service/LICENSE
+            service/README.md
+            service/src/
+            service/contracts/
+          if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: calidad-${{ inputs.attempt }}
+          path: |
+            service/target/surefire-reports/
+            service/target/jacoco-report/
+            service/target/bom.json
+            service/target/smoke.log
+          overwrite: true

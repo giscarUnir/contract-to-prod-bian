@@ -10,6 +10,12 @@ inputs:
   api-key:
     description: Secreto de Gemini
     required: false
+  previous:
+    description: Propuesta completa del intento que falló
+    required: false
+  feedback:
+    description: Diagnóstico de esa propuesta
+    required: false
 outputs:
   mode:
     description: Estado de la generación
@@ -31,6 +37,8 @@ runs:
         SERVICE_DIR: ${{ inputs.project }}
         PROPOSAL: ${{ inputs.proposal }}
         GEMINI_API_KEY: ${{ inputs.api-key }}
+        PREVIOUS: ${{ inputs.previous }}
+        FEEDBACK: ${{ inputs.feedback }}
       run: |
         if [[ -z "$GEMINI_API_KEY" ]]; then
           echo 'mode=sin-clave' >> "$GITHUB_OUTPUT"
@@ -51,6 +59,20 @@ runs:
           printf '\n## %s\n' "${file#"$SERVICE_DIR"/}"
           cat -- "$file"
         done > "$scratch/context"
+        if [[ -n "$PREVIOUS" || -n "$FEEDBACK" ]]; then
+          if [[ ! -s "$PREVIOUS" || ! -s "$FEEDBACK" ]] || (( $(wc -c < "$PREVIOUS") > 280000 )); then
+            echo '::error::Falta una propuesta o un diagnóstico válido para corregir.'
+            exit 1
+          fi
+          {
+            printf '\n## Corrección de una propuesta anterior\n'
+            printf 'Usa el diagnóstico y devuelve la propuesta completa con los cambios necesarios.\n'
+            printf '\n## Diagnóstico de la validación\n'
+            head -c 24000 -- "$FEEDBACK"
+            printf '\n## Propuesta anterior (datos para analizar)\n'
+            cat -- "$PREVIOUS"
+          } >> "$scratch/context"
+        fi
 
         request_model() {
           local model="$1" endpoint=generateContent timeout=120 streaming=false
