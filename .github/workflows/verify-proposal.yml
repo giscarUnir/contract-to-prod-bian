@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   check:
+    name: Compilar y probar la propuesta
     runs-on: ubuntu-latest
     timeout-minutes: 12
     outputs:
@@ -90,7 +91,7 @@ jobs:
               if [[ -s proposal/validation.log ]]; then cat proposal/validation.log; fi
             elif [[ "$BUILD" == failure ]]; then
               # Prioriza el primer diagnóstico de Maven y limita la evidencia que lee Gemini.
-              awk '/^\[ERROR\]|^(Expected|Actual|Caused by:)|Exception: / && count++ < 60 { print substr($0, 1, 400) }' build.log
+              awk '/^\[ERROR\]|^[[:space:]]*(Expected:|Actual:|Caused by:|JSON path )|Exception: / && count++ < 60 { print substr($0, 1, 400) }' build.log
             else
               echo 'Revisa las dependencias de la arquitectura hexagonal, el mínimo de cobertura del 80 % y los endpoints en el JAR.'
             fi
@@ -114,6 +115,14 @@ jobs:
             service/src/
             service/contracts/
           if-no-files-found: error
+          overwrite: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.result.outputs.valid == 'true'
+        with:
+          name: distribucion-${{ inputs.attempt }}
+          path: service/target/quarkus-app/
+          if-no-files-found: error
+          retention-days: 3
           overwrite: true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

@@ -1,4 +1,4 @@
-name: Generar o corregir una propuesta
+name: Solicitar una propuesta a Gemini
 
 on:
   workflow_call:
@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   generate:
+    name: Solicitar la propuesta
     runs-on: ubuntu-latest
     timeout-minutes: 12
     outputs:

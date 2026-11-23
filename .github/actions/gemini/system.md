@@ -16,6 +16,8 @@ Da a cada tipo de entrada un nombre específico de su operación, como `AbrirCue
 
 Mantén `java.util.UUID` como tipo de la clave de idempotencia a través del endpoint, del caso de uso, del repositorio y del mapa de pagos. `String` se usa para las referencias de cuenta y pago. No conviertas claves entre UUID y String.
 
+Las referencias deben cumplir el patrón del contrato también en las respuestas. Para un pago nuevo crea `"PAY-" + UUID.randomUUID().toString().substring(0, 8)`, con exactamente ocho caracteres hexadecimales minúsculos. Guarda la referencia creada en el agregado y devuelve esa misma en los reintentos idempotentes y en Retrieve. La referencia de cuenta lleva `CA-` y exactamente diez dígitos.
+
 En los DTO, asigna las constantes Java generadas de estado mediante un `switch` explícito. `AccountStatusEnum.ACTIVE` serializa como `"Active"` y `PaymentStatusEnum.REGISTERED` serializa como `"Registered"`. El método `fromValue` compara el texto JSON literalmente y no admite `"ACTIVE"` ni `"REGISTERED"`.
 
 Para mapeadores usa `jakarta.ws.rs.ext.ExceptionMapper` con `jakarta.ws.rs.ext.Provider`. La excepción de validación de Quarkus es `io.quarkus.hibernate.validator.runtime.jaxrs.ResteasyReactiveViolationException`. El mapper de `WebApplicationException` debe reconstruir las respuestas 400 con Content-Type JSON y el código `SOLICITUD_INVALIDA`, aunque la excepción no tenga cuerpo. Para otros estados, conserva la respuesta original.
