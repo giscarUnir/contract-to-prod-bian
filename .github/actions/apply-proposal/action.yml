@@ -60,11 +60,13 @@ runs:
             end
           | . as $files
           | if any(group_by(.path)[]; length > 1) then error("Rutas duplicadas en la propuesta.") else . end
-          | if all($layers[]; . as $layer | any($files[]; .path | startswith($main + $layer)))
-              and any($files[]; .path | startswith($test) and endswith("Test.java"))
-              and any($files[]; .path | startswith($main + "application/") and (startswith($main + "application/port/") | not))
-            then .
-            else error("Faltan archivos de dominio, casos de uso, puertos, adaptadores o pruebas unitarias.") end
+          | [$layers[] as $layer | select(any($files[]; .path | startswith($main + $layer)) | not) | $main + $layer] as $missing
+          | if ($missing | length) > 0 then error("Faltan archivos en: " + ($missing | join(", ")))
+            elif (any($files[]; .path | startswith($test) and endswith("Test.java")) | not) then
+              error("Falta una prueba unitaria que termine en Test.java.")
+            elif (any($files[]; .path | startswith($main + "application/") and (startswith($main + "application/port/") | not)) | not) then
+              error("Falta el servicio de aplicación que implementa los puertos.")
+            else . end
         ' "$PROPOSAL" > "$normalized" 2> "$validation_log"; then
           cat -- "$validation_log" >&2
           exit 1

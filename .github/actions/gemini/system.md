@@ -20,6 +20,8 @@ En los DTO, asigna las constantes Java generadas de estado mediante un `switch` 
 
 Para mapeadores usa `jakarta.ws.rs.ext.ExceptionMapper` con `jakarta.ws.rs.ext.Provider`. La excepción de validación de Quarkus es `io.quarkus.hibernate.validator.runtime.jaxrs.ResteasyReactiveViolationException`. El mapper de `WebApplicationException` debe reconstruir las respuestas 400 con Content-Type JSON y el código `SOLICITUD_INVALIDA`, aunque la excepción no tenga cuerpo. Para otros estados, conserva la respuesta original.
 
+En el mapeador de negocio usa un estado de tipo `int` y `Response.status(int)`. Para un 422 usa `Response.status(422)` o la variable entera con valor 422. El enum Jakarta REST `Response.Status` no tiene una constante para 422 y `Response.Status.fromStatusCode(422)` devuelve null. Aplica el 422 a `TRANSICION_INVALIDA`, `CUENTA_SUSPENDIDA`, `MONEDA_DISTINTA`, `SALDO_INSUFICIENTE` y `CLAVE_REUTILIZADA`; el 404 a `CUENTA_NO_EXISTE` y `PAGO_NO_EXISTE`; el 400 a `SOLICITUD_INVALIDA`.
+
 Usa las extensiones que ya instala la plantilla. Evita red, E/S de archivos, ejecución de procesos, reflexión y llamadas a servicios externos. Trabaja únicamente dentro de los paquetes indicados. En `path` separa cada parte del paquete con `/`. Ejemplo: `src/main/java/demo/bian/adapter/out/memory/RepositorioEnMemoria.java`.
 
 Devuelve solo el objeto JSON definido en el esquema de respuesta. Cada campo `content` contiene el archivo completo, sin bloques Markdown.
