@@ -1,0 +1,3 @@
+# UUID de idempotencia de las pruebas HTTP, retirados de la versión actual.
+70e78ddebb7e1051000b370f3ef9ed658d038be0:.github/actions/kubernetes/endpoints.sh:generic-api-key:39
+70e78ddebb7e1051000b370f3ef9ed658d038be0:.github/actions/kubernetes/endpoints.sh:generic-api-key:41

@@ -36,9 +36,9 @@ check 404 GET /CurrentAccount/desconocida/Retrieve '.code == "CUENTA_NO_EXISTE"'
 check 200 PUT "$account_path/Control" '.AccountStatus == "Suspended"' --data '{"ControlActionType":"Suspend"}'
 
 payment_body='{"PaymentAmount":30,"PaymentCurrency":"PEN","PayeeReference":"DEMO-K8S"}'
-payment_key='Idempotency-Key: 60ee9af0-1edf-4e2c-b867-0249e8e6d540'
+payment_key="Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)"
 check 422 POST "$account_path/Payments/Initiate" '.code == "CUENTA_SUSPENDIDA"' \
-    --header 'Idempotency-Key: 2c21d645-b203-48c7-8e57-dcaf914e4057' --data "$payment_body"
+    --header "Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)" --data "$payment_body"
 check 200 PUT "$account_path/Control" '.AccountStatus == "Active"' --data '{"ControlActionType":"Resume"}'
 check 201 POST "$account_path/Payments/Initiate" \
     '(.PaymentsReference | test("^PAY-[a-f0-9]{8}$")) and .PaymentStatus == "Registered"' \
