@@ -3,20 +3,31 @@ name: Contrato a código
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      sandbox_run_id:
+        description: ID de una corrida validada para repetir CodeQL y Kubernetes sin generar nuevas fuentes.
+        type: string
+      sandbox_attempt:
+        description: Intento que produjo el artefacto de distribución.
+        type: choice
+        default: inicial
+        options:
+          - inicial
+          - correccion
+          - segunda-correccion
 
 permissions:
   contents: read
 
 concurrency:
-  group: contract-to-code-${{ github.ref }}
+  group: contract-to-code-${{ github.ref }}-${{ inputs.sandbox_run_id && 'sandbox' || 'completo' }}
   cancel-in-progress: true
 
 jobs:
   contract:
     name: Contrato y compatibilidad
+    if: "!inputs.sandbox_run_id"
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -42,6 +53,7 @@ jobs:
 
   secrets:
     name: Escaneo de secretos
+    if: "!inputs.sandbox_run_id"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -55,12 +67,14 @@ jobs:
             https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all .
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all --gitleaks-ignore-path .github/gitleaks.ignore .
 
   propose:
     name: Generación completa con Gemini
     needs: [contract, secrets]
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      !inputs.sandbox_run_id &&
+      (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
     uses: ./.github/workflows/gemini-proposal.yml
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -74,7 +88,7 @@ jobs:
       proposal: propuesta-gemini
 
   repair:
-    name: Reintento de generación con Gemini
+    name: Ajustar la implementación con Gemini
     needs: verify
     if: needs.verify.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
@@ -85,7 +99,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify_repair:
-    name: Evaluar la propuesta del reintento
+    name: Verificar la implementación ajustada
     needs: repair
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -93,7 +107,7 @@ jobs:
       proposal: propuesta-corregida
 
   repair_again:
-    name: Segundo reintento de generación con Gemini
+    name: Ajuste final de la implementación con Gemini
     needs: verify_repair
     if: needs.verify_repair.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
@@ -105,7 +119,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify_again:
-    name: Evaluar la propuesta del segundo reintento
+    name: Verificar el ajuste final
     needs: repair_again
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -166,10 +180,102 @@ jobs:
           path: osv-report.json
           overwrite: true
 
+  codeql:
+    name: CodeQL y política de seguridad
+    needs: validated
+    if: >-
+      !cancelled() && (needs.validated.result == 'success'
+      || (github.event_name == 'workflow_dispatch' && inputs.sandbox_run_id != ''))
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: proyecto-validado-${{ inputs.sandbox_run_id && inputs.sandbox_attempt || needs.validated.outputs.attempt }}
+          path: current-account
+          run-id: ${{ inputs.sandbox_run_id || github.run_id }}
+          github-token: ${{ inputs.sandbox_run_id && github.token || '' }}
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+      - name: Compilar las fuentes generadas para CodeQL
+        shell: bash
+        run: mvn -B -ntp -f current-account/pom.xml -DskipTests compile
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /current-account/java
+          output: codeql-results
+          upload: ${{ inputs.sandbox_run_id && 'never' || 'always' }}
+          upload-database: false
+      - name: Bloquear la entrega ante alertas altas o críticas
+        shell: bash
+        run: |
+          findings=$(jq -es '
+            if ([.[].runs[] | select(.tool.driver.name == "CodeQL" and (.results | type == "array"))] | length) == 0
+            then error("Falta un informe SARIF válido de CodeQL.")
+            else [
+              .[].runs[]
+              | (reduce (.tool | (.driver, .extensions[]?) | .rules[]?) as $rule
+                  ({}; .[$rule.id] = ($rule.properties["security-severity"] | tonumber? // 0))) as $severity
+              | .results[]
+              | select(($severity[.ruleId] // 0) >= 7)
+              | .ruleId
+            ] | length
+            end
+          ' codeql-results/*.sarif)
+          printf 'CodeQL encontró %s alertas de seguridad altas o críticas.\n' "$findings" | tee -a "$GITHUB_STEP_SUMMARY"
+          if (( findings > 0 )); then
+            echo '::error::CodeQL encontró alertas altas o críticas. Consulta el informe SARIF.'
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: "!cancelled()"
+        with:
+          name: seguridad-codeql
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          overwrite: true
+
+  kubernetes:
+    name: Despliegue y pruebas HTTP en Kubernetes
+    needs: validated
+    if: "!cancelled() && needs.validated.result == 'success'"
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/kubernetes.yml
+    with:
+      attempt: ${{ needs.validated.outputs.attempt }}
+
+  sandbox:
+    name: Prueba rápida en Kubernetes
+    if: github.event_name == 'workflow_dispatch' && inputs.sandbox_run_id != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/kubernetes.yml
+    with:
+      attempt: ${{ inputs.sandbox_attempt }}
+      source-run: ${{ inputs.sandbox_run_id }}
+
   delivery:
     name: Entregar microservicio verificado
-    needs: [validated, dependencies]
-    if: "!cancelled() && needs.validated.result == 'success' && needs.dependencies.result == 'success'"
+    needs: [validated, dependencies, codeql, kubernetes]
+    if: >-
+      !cancelled() && needs.validated.result == 'success' && needs.dependencies.result == 'success'
+      && needs.codeql.result == 'success' && needs.kubernetes.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 4
     outputs:
@@ -190,8 +296,8 @@ jobs:
 
   report:
     name: Informe del PR
-    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, delivery]
-    if: always() && !cancelled()
+    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, codeql, kubernetes, delivery]
+    if: always() && !cancelled() && !inputs.sandbox_run_id
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -217,12 +323,14 @@ jobs:
               ['Escaneo de secretos', jobs.secrets.result],
               ['Generación completa con Gemini', jobs.propose.result],
               ['Evaluación de la propuesta inicial', verification(jobs.verify)],
-              ['Reintento de generación', jobs.repair.result],
-              ['Evaluación de la propuesta del reintento', verification(jobs.verify_repair)],
-              ['Segundo reintento de generación', jobs.repair_again.result],
-              ['Evaluación de la propuesta del segundo reintento', verification(jobs.verify_again)],
+              ['Ajuste de la implementación con Gemini', jobs.repair.result],
+              ['Verificación de la implementación ajustada', verification(jobs.verify_repair)],
+              ['Ajuste final de la implementación con Gemini', jobs.repair_again.result],
+              ['Verificación del ajuste final', verification(jobs.verify_again)],
               ['Validación final', jobs.validated.result],
               ['Dependencias y SBOM', jobs.dependencies.result],
+              ['CodeQL y política de seguridad', jobs.codeql.result],
+              ['Despliegue y pruebas HTTP dentro de Kubernetes', jobs.kubernetes.result],
               ['Entrega del microservicio', jobs.delivery.result],
             ];
             const implementation = proposal.mode === 'gemini' ? `Implementación propuesta por \`${proposal.model}\``
@@ -235,8 +343,8 @@ jobs:
               '## Contrato a código',
               implementation,
               proposal.model && proposal.model !== proposal.primary ? `Modelo de respaldo. Principal: \`${proposal.primary}\`.` : '',
-              repair.model ? `Modelo del primer reintento: \`${repair.model}\`.` : '',
-              lastRepair.model ? `Modelo del segundo reintento: \`${lastRepair.model}\`.` : '',
+              repair.model ? `Modelo del ajuste: \`${repair.model}\`.` : '',
+              lastRepair.model ? `Modelo del ajuste final: \`${lastRepair.model}\`.` : '',
               '',
               '| Control | Resultado |',
               '| --- | --- |',

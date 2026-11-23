@@ -85,3 +85,11 @@ runs:
               "$normalized" > "$destination"
           )
         done < <(jq -br '.[].path' "$normalized")
+    - name: Resolver referencias ambiguas a comandos de los puertos
+      shell: bash
+      env:
+        SERVICE_DIR: ${{ inputs.project }}
+        PROPOSAL: ${{ inputs.proposal }}
+      run: |
+        java "$GITHUB_ACTION_PATH/QualifyPortTypes.java" "$SERVICE_DIR" \
+          2>&1 | tee -a "$(dirname -- "$PROPOSAL")/validation.log"
