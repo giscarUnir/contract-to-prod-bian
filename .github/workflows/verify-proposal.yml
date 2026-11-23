@@ -90,7 +90,7 @@ jobs:
               if [[ -s proposal/validation.log ]]; then cat proposal/validation.log; fi
             elif [[ "$BUILD" == failure ]]; then
               # Prioriza el primer diagnóstico de Maven y limita la evidencia que lee Gemini.
-              awk '/^\[ERROR\]/ && count++ < 45 { print substr($0, 1, 500) }' build.log
+              awk '/^\[ERROR\]|^(Expected|Actual|Caused by:)|Exception: / && count++ < 60 { print substr($0, 1, 400) }' build.log
             else
               echo 'Revisa las dependencias de la arquitectura hexagonal, el mínimo de cobertura del 80 % y los endpoints en el JAR.'
             fi

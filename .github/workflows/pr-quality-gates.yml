@@ -79,7 +79,8 @@ jobs:
     if: needs.verify.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
     with:
-      repair: true
+      repair-from: inicial
+      artifact: propuesta-corregida
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
@@ -91,9 +92,29 @@ jobs:
       attempt: correccion
       proposal: propuesta-corregida
 
+  repair_again:
+    name: Corregir la propuesta por segunda y última vez
+    needs: verify_repair
+    if: needs.verify_repair.outputs.valid == 'false'
+    uses: ./.github/workflows/gemini-proposal.yml
+    with:
+      repair-from: correccion
+      previous: propuesta-corregida
+      artifact: propuesta-corregida-final
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+  verify_again:
+    name: Verificar la última propuesta
+    needs: repair_again
+    uses: ./.github/workflows/verify-proposal.yml
+    with:
+      attempt: segunda-correccion
+      proposal: propuesta-corregida-final
+
   validated:
     name: Validar el resultado final
-    needs: [propose, verify, repair, verify_repair]
+    needs: [propose, verify, repair, verify_repair, repair_again, verify_again]
     if: "!cancelled() && needs.propose.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -105,11 +126,14 @@ jobs:
         env:
           FIRST: ${{ needs.verify.result == 'success' && needs.verify.outputs.valid == 'true' }}
           REPAIRED: ${{ needs.verify_repair.result == 'success' && needs.verify_repair.outputs.valid == 'true' }}
+          REPAIRED_AGAIN: ${{ needs.verify_again.result == 'success' && needs.verify_again.outputs.valid == 'true' }}
         run: |
           if [[ "$FIRST" == true ]]; then
             echo 'attempt=inicial' >> "$GITHUB_OUTPUT"
           elif [[ "$REPAIRED" == true ]]; then
             echo 'attempt=correccion' >> "$GITHUB_OUTPUT"
+          elif [[ "$REPAIRED_AGAIN" == true ]]; then
+            echo 'attempt=segunda-correccion' >> "$GITHUB_OUTPUT"
           else
             echo '::error::Ninguna propuesta pasó todos los controles. Consulta el diagnóstico de cada intento.'
             exit 1
@@ -165,7 +189,7 @@ jobs:
 
   report:
     name: Informe del PR
-    needs: [contract, secrets, propose, verify, repair, verify_repair, validated, dependencies, delivery]
+    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, delivery]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -182,8 +206,10 @@ jobs:
             const status = { success: 'Correcto', failure: 'Falló', skipped: 'Omitido', cancelled: 'Cancelado' };
             const proposal = jobs.propose.outputs;
             const repair = jobs.repair.outputs;
+            const lastRepair = jobs.repair_again.outputs;
             const attempt = jobs.validated.outputs.attempt;
-            const metrics = (attempt === 'correccion' ? jobs.verify_repair : jobs.verify).outputs;
+            const attempts = { inicial: jobs.verify, correccion: jobs.verify_repair, 'segunda-correccion': jobs.verify_again };
+            const metrics = attempts[attempt]?.outputs ?? {};
             const verification = job => job.result === 'success' && job.outputs.valid !== 'true' ? 'failure' : job.result;
             const stages = [
               ['Spectral y compatibilidad', jobs.contract.result],
@@ -192,6 +218,8 @@ jobs:
               ['Compilación, pruebas y cobertura del primer intento', verification(jobs.verify)],
               ['Corrección de la propuesta', jobs.repair.result],
               ['Compilación, pruebas y cobertura de la corrección', verification(jobs.verify_repair)],
+              ['Segunda corrección', jobs.repair_again.result],
+              ['Compilación, pruebas y cobertura de la segunda corrección', verification(jobs.verify_again)],
               ['Validación final', jobs.validated.result],
               ['Dependencias y SBOM', jobs.dependencies.result],
               ['Entrega del microservicio', jobs.delivery.result],
@@ -207,6 +235,7 @@ jobs:
               implementation,
               proposal.model && proposal.model !== proposal.primary ? `Modelo de respaldo. Principal: \`${proposal.primary}\`.` : '',
               repair.model ? `Corrección propuesta por \`${repair.model}\`.` : '',
+              lastRepair.model ? `Segunda corrección propuesta por \`${lastRepair.model}\`.` : '',
               '',
               '| Control | Resultado |',
               '| --- | --- |',
