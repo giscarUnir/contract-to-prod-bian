@@ -1,0 +1,70 @@
+name: Generar o corregir una propuesta
+
+on:
+  workflow_call:
+    inputs:
+      repair:
+        description: Usa la propuesta y el diagnóstico del intento inicial.
+        type: boolean
+        default: false
+    secrets:
+      GEMINI_API_KEY:
+        required: false
+    outputs:
+      mode:
+        value: ${{ jobs.generate.outputs.mode }}
+      model:
+        value: ${{ jobs.generate.outputs.model }}
+      primary:
+        value: ${{ jobs.generate.outputs.primary }}
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      mode: ${{ steps.gemini.outputs.mode }}
+      model: ${{ steps.gemini.outputs.model }}
+      primary: ${{ steps.gemini.outputs.primary }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: ./.github/actions/generate-service
+        with:
+          output: service
+      - name: Generar las interfaces Jakarta REST
+        run: mvn -B -ntp -f service/pom.xml generate-sources
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.repair
+        with:
+          name: propuesta-gemini
+          path: repair
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.repair
+        with:
+          name: diagnostico-inicial
+          path: repair
+      - name: Solicitar la implementación y sus pruebas
+        id: gemini
+        uses: ./.github/actions/gemini
+        with:
+          project: service
+          proposal: proposal/files.json
+          api-key: ${{ secrets.GEMINI_API_KEY }}
+          previous: ${{ inputs.repair && 'repair/files.json' || '' }}
+          feedback: ${{ inputs.repair && 'repair/feedback.txt' || '' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.gemini.outputs.mode == 'gemini'
+        with:
+          name: ${{ inputs.repair && 'propuesta-corregida' || 'propuesta-gemini' }}
+          path: proposal/files.json
+          if-no-files-found: error
+          overwrite: true

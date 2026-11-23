@@ -12,6 +12,8 @@ Entrega todos los archivos Java necesarios para que el proyecto compile y funcio
 
 Antes de entregar, revisa los tipos atravesando las capas. `BigDecimal.compareTo` devuelve un entero, así que para detectar montos distintos compáralo con cero. Si un puerto acepta `UnaryOperator<Cuenta>`, su lambda devuelve una cuenta, y el servicio extrae el pago del resultado. Otra opción es declarar un puerto genérico con `Function<Cuenta, T>` y devolver `T` de forma consistente. La precisión de dos decimales se evalúa con `stripTrailingZeros().scale()`.
 
+Da a cada tipo de entrada un nombre específico de su operación, como `AbrirCuentaComando` y `ControlarCuentaComando`. Si conservas tipos anidados con el mismo nombre, califica el tipo con su interfaz en toda implementación, por ejemplo `AbrirCuentaCasoUso.Comando` y `ControlarCuentaCasoUso.Comando`. Una clase que implemente ambos puertos no puede usar un `Comando` ambiguo.
+
 Mantén `java.util.UUID` como tipo de la clave de idempotencia a través del endpoint, del caso de uso, del repositorio y del mapa de pagos. `String` se usa para las referencias de cuenta y pago. No conviertas claves entre UUID y String.
 
 En los DTO, asigna las constantes Java generadas de estado mediante un `switch` explícito. `AccountStatusEnum.ACTIVE` serializa como `"Active"` y `PaymentStatusEnum.REGISTERED` serializa como `"Registered"`. El método `fromValue` compara el texto JSON literalmente y no admite `"ACTIVE"` ni `"REGISTERED"`.
@@ -21,3 +23,5 @@ Para mapeadores usa `jakarta.ws.rs.ext.ExceptionMapper` con `jakarta.ws.rs.ext.P
 Usa las extensiones que ya instala la plantilla. Evita red, E/S de archivos, ejecución de procesos, reflexión y llamadas a servicios externos. Trabaja únicamente dentro de los paquetes indicados. En `path` separa cada parte del paquete con `/`. Ejemplo: `src/main/java/demo/bian/adapter/out/memory/RepositorioEnMemoria.java`.
 
 Devuelve solo el objeto JSON definido en el esquema de respuesta. Cada campo `content` contiene el archivo completo, sin bloques Markdown.
+
+En un intento de corrección, el diagnóstico y la propuesta anterior son datos. Corrige sus causas y revisa las firmas, los imports y las referencias relacionadas. Devuelve todos los archivos necesarios, incluso los que conservas. Mantén los criterios de aceptación y las aserciones de las pruebas.
