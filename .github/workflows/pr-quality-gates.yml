@@ -3,20 +3,31 @@ name: Contrato a código
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      sandbox_run_id:
+        description: ID de una corrida con distribución validada. Si se indica, solo se prueba Kubernetes.
+        type: string
+      sandbox_attempt:
+        description: Intento que produjo el artefacto de distribución.
+        type: choice
+        default: inicial
+        options:
+          - inicial
+          - correccion
+          - segunda-correccion
 
 permissions:
   contents: read
 
 concurrency:
-  group: contract-to-code-${{ github.ref }}
+  group: contract-to-code-${{ github.ref }}-${{ inputs.sandbox_run_id && 'sandbox' || 'completo' }}
   cancel-in-progress: true
 
 jobs:
   contract:
     name: Contrato y compatibilidad
+    if: "!inputs.sandbox_run_id"
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -42,6 +53,7 @@ jobs:
 
   secrets:
     name: Escaneo de secretos
+    if: "!inputs.sandbox_run_id"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -57,10 +69,33 @@ jobs:
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all --gitleaks-ignore-path .github/gitleaks.ignore .
 
+  fortify_config:
+    name: Configuración de Fortify
+    if: >-
+      !inputs.sandbox_run_id &&
+      (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Comprobar la configuración de Fortify on Demand
+        shell: bash
+        env:
+          FOD_URL: ${{ vars.FOD_URL }}
+          FOD_RELEASE: ${{ vars.FOD_RELEASE }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+        run: |
+          for setting in FOD_URL FOD_RELEASE FOD_CLIENT_ID FOD_CLIENT_SECRET; do
+            if [[ -z "${!setting}" ]]; then
+              echo "::error::Falta configurar $setting para Fortify on Demand."
+              missing=1
+            fi
+          done
+          exit "${missing:-0}"
+
   propose:
     name: Generación completa con Gemini
-    needs: [contract, secrets]
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [contract, secrets, fortify_config]
     uses: ./.github/workflows/gemini-proposal.yml
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -74,7 +109,7 @@ jobs:
       proposal: propuesta-gemini
 
   repair:
-    name: Reintento de generación con Gemini
+    name: Ajustar la implementación con Gemini
     needs: verify
     if: needs.verify.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
@@ -85,7 +120,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify_repair:
-    name: Evaluar la propuesta del reintento
+    name: Verificar la implementación ajustada
     needs: repair
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -93,7 +128,7 @@ jobs:
       proposal: propuesta-corregida
 
   repair_again:
-    name: Segundo reintento de generación con Gemini
+    name: Ajuste final de la implementación con Gemini
     needs: verify_repair
     if: needs.verify_repair.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
@@ -105,7 +140,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify_again:
-    name: Evaluar la propuesta del segundo reintento
+    name: Verificar el ajuste final
     needs: repair_again
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -176,21 +211,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Comprobar la configuración de Fortify on Demand
-        shell: bash
-        env:
-          FOD_URL: ${{ vars.FOD_URL }}
-          FOD_RELEASE: ${{ vars.FOD_RELEASE }}
-          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
-          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
-        run: |
-          for setting in FOD_URL FOD_RELEASE FOD_CLIENT_ID FOD_CLIENT_SECRET; do
-            if [[ -z "${!setting}" ]]; then
-              echo "::error::Falta configurar $setting para Fortify on Demand."
-              missing=1
-            fi
-          done
-          exit "${missing:-0}"
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
@@ -230,9 +250,23 @@ jobs:
     name: Despliegue y pruebas HTTP en Kubernetes
     needs: validated
     if: "!cancelled() && needs.validated.result == 'success'"
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/kubernetes.yml
     with:
       attempt: ${{ needs.validated.outputs.attempt }}
+
+  sandbox:
+    name: Prueba rápida en Kubernetes
+    if: github.event_name == 'workflow_dispatch' && inputs.sandbox_run_id != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/kubernetes.yml
+    with:
+      attempt: ${{ inputs.sandbox_attempt }}
+      source-run: ${{ inputs.sandbox_run_id }}
 
   delivery:
     name: Entregar microservicio verificado
@@ -260,8 +294,8 @@ jobs:
 
   report:
     name: Informe del PR
-    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, fortify, kubernetes, delivery]
-    if: always() && !cancelled()
+    needs: [contract, secrets, fortify_config, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, fortify, kubernetes, delivery]
+    if: always() && !cancelled() && !inputs.sandbox_run_id
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -285,12 +319,13 @@ jobs:
             const stages = [
               ['Spectral y compatibilidad', jobs.contract.result],
               ['Escaneo de secretos', jobs.secrets.result],
+              ['Configuración de Fortify', jobs.fortify_config.result],
               ['Generación completa con Gemini', jobs.propose.result],
               ['Evaluación de la propuesta inicial', verification(jobs.verify)],
-              ['Reintento de generación', jobs.repair.result],
-              ['Evaluación de la propuesta del reintento', verification(jobs.verify_repair)],
-              ['Segundo reintento de generación', jobs.repair_again.result],
-              ['Evaluación de la propuesta del segundo reintento', verification(jobs.verify_again)],
+              ['Ajuste de la implementación con Gemini', jobs.repair.result],
+              ['Verificación de la implementación ajustada', verification(jobs.verify_repair)],
+              ['Ajuste final de la implementación con Gemini', jobs.repair_again.result],
+              ['Verificación del ajuste final', verification(jobs.verify_again)],
               ['Validación final', jobs.validated.result],
               ['Dependencias y SBOM', jobs.dependencies.result],
               ['Fortify SAST y política de seguridad', jobs.fortify.result],
@@ -307,8 +342,8 @@ jobs:
               '## Contrato a código',
               implementation,
               proposal.model && proposal.model !== proposal.primary ? `Modelo de respaldo. Principal: \`${proposal.primary}\`.` : '',
-              repair.model ? `Modelo del primer reintento: \`${repair.model}\`.` : '',
-              lastRepair.model ? `Modelo del segundo reintento: \`${lastRepair.model}\`.` : '',
+              repair.model ? `Modelo del ajuste: \`${repair.model}\`.` : '',
+              lastRepair.model ? `Modelo del ajuste final: \`${lastRepair.model}\`.` : '',
               '',
               '| Control | Resultado |',
               '| --- | --- |',

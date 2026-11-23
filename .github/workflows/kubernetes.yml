@@ -7,9 +7,14 @@ on:
         description: Identificador de la distribución Quarkus validada.
         type: string
         required: true
+      source-run:
+        description: Corrida anterior del mismo repositorio que contiene la distribución.
+        type: string
+        required: false
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   endpoints:
@@ -24,6 +29,8 @@ jobs:
         with:
           name: distribucion-${{ inputs.attempt }}
           path: quarkus-app
+          run-id: ${{ inputs.source-run || github.run_id }}
+          github-token: ${{ inputs.source-run && github.token || '' }}
       - name: Crear el clúster efímero
         id: cluster
         uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
