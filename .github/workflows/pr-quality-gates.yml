@@ -66,7 +66,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify:
-    name: Verificar la primera propuesta
+    name: Evaluar la propuesta inicial
     needs: propose
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -74,7 +74,7 @@ jobs:
       proposal: propuesta-gemini
 
   repair:
-    name: Corregir la propuesta con Gemini
+    name: Reintento de generación con Gemini
     needs: verify
     if: needs.verify.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
@@ -85,7 +85,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify_repair:
-    name: Verificar la propuesta corregida
+    name: Evaluar la propuesta del reintento
     needs: repair
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -93,7 +93,7 @@ jobs:
       proposal: propuesta-corregida
 
   repair_again:
-    name: Corregir la propuesta por segunda y última vez
+    name: Segundo reintento de generación con Gemini
     needs: verify_repair
     if: needs.verify_repair.outputs.valid == 'false'
     uses: ./.github/workflows/gemini-proposal.yml
@@ -105,7 +105,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   verify_again:
-    name: Verificar la última propuesta
+    name: Evaluar la propuesta del segundo reintento
     needs: repair_again
     uses: ./.github/workflows/verify-proposal.yml
     with:
@@ -121,7 +121,8 @@ jobs:
     outputs:
       attempt: ${{ steps.select.outputs.attempt }}
     steps:
-      - id: select
+      - name: Seleccionar la propuesta que pasó los controles
+        id: select
         shell: bash
         env:
           FIRST: ${{ needs.verify.result == 'success' && needs.verify.outputs.valid == 'true' }}
@@ -215,11 +216,11 @@ jobs:
               ['Spectral y compatibilidad', jobs.contract.result],
               ['Escaneo de secretos', jobs.secrets.result],
               ['Generación completa con Gemini', jobs.propose.result],
-              ['Compilación, pruebas y cobertura del primer intento', verification(jobs.verify)],
-              ['Corrección de la propuesta', jobs.repair.result],
-              ['Compilación, pruebas y cobertura de la corrección', verification(jobs.verify_repair)],
-              ['Segunda corrección', jobs.repair_again.result],
-              ['Compilación, pruebas y cobertura de la segunda corrección', verification(jobs.verify_again)],
+              ['Evaluación de la propuesta inicial', verification(jobs.verify)],
+              ['Reintento de generación', jobs.repair.result],
+              ['Evaluación de la propuesta del reintento', verification(jobs.verify_repair)],
+              ['Segundo reintento de generación', jobs.repair_again.result],
+              ['Evaluación de la propuesta del segundo reintento', verification(jobs.verify_again)],
               ['Validación final', jobs.validated.result],
               ['Dependencias y SBOM', jobs.dependencies.result],
               ['Entrega del microservicio', jobs.delivery.result],
@@ -234,8 +235,8 @@ jobs:
               '## Contrato a código',
               implementation,
               proposal.model && proposal.model !== proposal.primary ? `Modelo de respaldo. Principal: \`${proposal.primary}\`.` : '',
-              repair.model ? `Corrección propuesta por \`${repair.model}\`.` : '',
-              lastRepair.model ? `Segunda corrección propuesta por \`${lastRepair.model}\`.` : '',
+              repair.model ? `Modelo del primer reintento: \`${repair.model}\`.` : '',
+              lastRepair.model ? `Modelo del segundo reintento: \`${lastRepair.model}\`.` : '',
               '',
               '| Control | Resultado |',
               '| --- | --- |',

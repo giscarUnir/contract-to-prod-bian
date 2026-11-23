@@ -26,6 +26,7 @@ permissions:
 
 jobs:
   check:
+    name: Compilar y probar la propuesta
     runs-on: ubuntu-latest
     timeout-minutes: 12
     outputs:
