@@ -1,0 +1,81 @@
+name: Despliegue y pruebas HTTP en Kubernetes
+
+on:
+  workflow_call:
+    inputs:
+      attempt:
+        description: Identificador de la distribución Quarkus validada.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  endpoints:
+    name: Probar el servicio desde un Job de Kubernetes
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: distribucion-${{ inputs.attempt }}
+          path: quarkus-app
+      - name: Crear el clúster efímero
+        id: cluster
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          version: v0.33.0
+          cluster_name: current-account
+          wait: 90s
+      - name: Construir y cargar las imágenes locales
+        shell: bash
+        run: |
+          test -f quarkus-app/quarkus-run.jar
+          docker build -t current-account:ci -f .github/actions/kubernetes/Dockerfile.service quarkus-app
+          docker build -t current-account-tests:ci -f .github/actions/kubernetes/Dockerfile.tests .github/actions/kubernetes
+          kind load docker-image current-account:ci current-account-tests:ci --name current-account
+      - name: Desplegar Quarkus y esperar su disponibilidad
+        shell: bash
+        run: |
+          kubectl create namespace current-account-ci
+          kubectl -n current-account-ci apply -f .github/actions/kubernetes/service.yml
+          kubectl -n current-account-ci rollout status deployment/current-account --timeout=120s
+      - name: Ejecutar las pruebas por la red interna del clúster
+        shell: bash
+        run: |
+          kubectl -n current-account-ci create configmap pruebas-http \
+            --from-file=endpoints.sh=.github/actions/kubernetes/endpoints.sh
+          kubectl -n current-account-ci apply -f .github/actions/kubernetes/test-job.yml
+          for ((attempt = 0; attempt < 75; attempt++)); do
+            conditions=$(kubectl -n current-account-ci get job pruebas-http \
+              -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}')
+            if grep -qx Complete <<< "$conditions"; then exit 0; fi
+            if grep -qx Failed <<< "$conditions"; then
+              echo '::error::Fallaron las pruebas HTTP dentro del clúster.'
+              exit 1
+            fi
+            sleep 2
+          done
+          echo '::error::Las pruebas HTTP no terminaron en el tiempo asignado.'
+          exit 1
+      - name: Recoger resultados y eventos de Kubernetes
+        if: always() && steps.cluster.outcome == 'success'
+        shell: bash
+        run: |
+          mkdir -p evidencia-kubernetes
+          kubectl -n current-account-ci logs job/pruebas-http > evidencia-kubernetes/endpoints.log 2>&1 || true
+          kubectl -n current-account-ci logs deployment/current-account > evidencia-kubernetes/quarkus.log 2>&1 || true
+          kubectl -n current-account-ci describe deployment,service,job,pod > evidencia-kubernetes/recursos.log 2>&1 || true
+          kubectl -n current-account-ci get events --sort-by=.metadata.creationTimestamp > evidencia-kubernetes/eventos.log 2>&1 || true
+          cat evidencia-kubernetes/endpoints.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.cluster.outcome == 'success'
+        with:
+          name: evidencia-kubernetes
+          path: evidencia-kubernetes/
+          if-no-files-found: error
+          overwrite: true

@@ -2,14 +2,18 @@ package demo.bian;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import org.hamcrest.FeatureMatcher;
+import org.hamcrest.Matcher;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.JSON;
+import static org.hamcrest.Matchers.comparesEqualTo;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,11 +33,11 @@ class CurrentAccountAcceptanceTest {
                 .body("CustomerReference", equalTo("DEMO-CLIENTE"))
                 .body("AccountCurrency", equalTo("PEN"))
                 .body("AccountStatus", equalTo("Active"))
-                .body("AccountBalance", equalTo(100));
+                .body("AccountBalance", amount(100));
 
         given().contentType(JSON).body(Map.of("CustomerReference", "DEMO", "AccountCurrency", "USD"))
                 .post(ACCOUNTS + "/Initiate").then().statusCode(201)
-                .body("AccountBalance", equalTo(0));
+                .body("AccountBalance", amount(0));
     }
 
     @Test
@@ -60,7 +64,7 @@ class CurrentAccountAcceptanceTest {
         String id = open(100);
         pay(id, UUID.randomUUID(), "USD", 30).statusCode(422).body("code", equalTo("MONEDA_DISTINTA"));
         pay(id, UUID.randomUUID(), "PEN", 101).statusCode(422).body("code", equalTo("SALDO_INSUFICIENTE"));
-        given().get(FIND, id).then().statusCode(200).body("AccountBalance", equalTo(100));
+        given().get(FIND, id).then().statusCode(200).body("AccountBalance", amount(100));
     }
 
     @Test
@@ -70,10 +74,10 @@ class CurrentAccountAcceptanceTest {
                 .body("PaymentsReference", matchesPattern("PAY-[a-f0-9]{8}"))
                 .body("PaymentStatus", equalTo("Registered"))
                 .extract().path("PaymentsReference");
-        given().get(FIND, account).then().statusCode(200).body("AccountBalance", equalTo(70));
+        given().get(FIND, account).then().statusCode(200).body("AccountBalance", amount(70));
         given().get(FIND_PAYMENT, account, payment).then().statusCode(200)
                 .body("PaymentsReference", equalTo(payment))
-                .body("PaymentAmount", equalTo(30))
+                .body("PaymentAmount", amount(30))
                 .body("PayeeReference", equalTo("DEMO-BENEFICIARIO"));
         given().get(FIND_PAYMENT, open(0), payment).then().statusCode(404)
                 .body("code", equalTo("PAGO_NO_EXISTE"));
@@ -92,7 +96,7 @@ class CurrentAccountAcceptanceTest {
             assertEquals(first.get(), reference(id, key));
         }
         pay(id, key, "PEN", 31).statusCode(422).body("code", equalTo("CLAVE_REUTILIZADA"));
-        given().get(FIND, id).then().statusCode(200).body("AccountBalance", equalTo(70));
+        given().get(FIND, id).then().statusCode(200).body("AccountBalance", amount(70));
     }
 
     @Test
@@ -131,5 +135,14 @@ class CurrentAccountAcceptanceTest {
     private static ValidatableResponse control(String id, String action) {
         return given().contentType(JSON).body(Map.of("ControlActionType", action))
                 .put(CONTROL, id).then();
+    }
+
+    private static Matcher<Number> amount(long expected) {
+        return new FeatureMatcher<>(comparesEqualTo(BigDecimal.valueOf(expected)), "importe", "valor") {
+            @Override
+            protected BigDecimal featureValueOf(Number actual) {
+                return new BigDecimal(actual.toString());
+            }
+        };
     }
 }

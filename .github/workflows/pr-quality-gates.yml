@@ -166,10 +166,73 @@ jobs:
           path: osv-report.json
           overwrite: true
 
+  fortify:
+    name: Fortify SAST y política de seguridad
+    needs: validated
+    concurrency:
+      group: fortify-fod-release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Comprobar la configuración de Fortify on Demand
+        shell: bash
+        env:
+          FOD_URL: ${{ vars.FOD_URL }}
+          FOD_RELEASE: ${{ vars.FOD_RELEASE }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+        run: |
+          for setting in FOD_URL FOD_RELEASE FOD_CLIENT_ID FOD_CLIENT_SECRET; do
+            if [[ -z "${!setting}" ]]; then
+              echo "::error::Falta configurar $setting para Fortify on Demand."
+              missing=1
+            fi
+          done
+          exit "${missing:-0}"
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: proyecto-validado-${{ needs.validated.outputs.attempt }}
+          path: current-account
+      - uses: fortify/github-action/setup@0540f6aefd95d12a5fbed40f406d825fad64330e # v3.1.1
+        with:
+          fcli: '3.30.0'
+      - name: Preparar las fuentes y dependencias para el escaneo
+        shell: bash
+        run: |
+          mvn -B -ntp -f current-account/pom.xml generate-sources
+          fcli fod action run package --source-dir "$PWD/current-account" --output "$RUNNER_TEMP/fortify.zip"
+          test -s "$RUNNER_TEMP/fortify.zip"
+      - name: Ejecutar SAST y exigir que se cumpla la política de Fortify
+        shell: bash
+        env:
+          FOD_URL: ${{ vars.FOD_URL }}
+          FOD_RELEASE: ${{ vars.FOD_RELEASE }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          DO_SETUP: 'false'
+          DO_SAST_SCAN: 'true'
+          DO_WAIT: 'true'
+          DO_CHECK_POLICY: 'true'
+          DO_SAST_EXPORT: 'false'
+          DO_PR_COMMENT: 'false'
+          DO_AVIATOR_REMEDIATIONS: 'false'
+        run: USE_PACKAGE="$RUNNER_TEMP/fortify.zip" fcli action run ci
+
+  kubernetes:
+    name: Despliegue y pruebas HTTP en Kubernetes
+    needs: validated
+    uses: ./.github/workflows/kubernetes.yml
+    with:
+      attempt: ${{ needs.validated.outputs.attempt }}
+
   delivery:
     name: Entregar microservicio verificado
-    needs: [validated, dependencies]
-    if: "!cancelled() && needs.validated.result == 'success' && needs.dependencies.result == 'success'"
+    needs: [validated, dependencies, fortify, kubernetes]
     runs-on: ubuntu-latest
     timeout-minutes: 4
     outputs:
@@ -190,7 +253,7 @@ jobs:
 
   report:
     name: Informe del PR
-    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, delivery]
+    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, fortify, kubernetes, delivery]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -223,6 +286,8 @@ jobs:
               ['Evaluación de la propuesta del segundo reintento', verification(jobs.verify_again)],
               ['Validación final', jobs.validated.result],
               ['Dependencias y SBOM', jobs.dependencies.result],
+              ['Fortify SAST y política de seguridad', jobs.fortify.result],
+              ['Despliegue y pruebas HTTP dentro de Kubernetes', jobs.kubernetes.result],
               ['Entrega del microservicio', jobs.delivery.result],
             ];
             const implementation = proposal.mode === 'gemini' ? `Implementación propuesta por \`${proposal.model}\``

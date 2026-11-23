@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pruebas-http
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: endpoints
+          image: current-account-tests:ci
+          imagePullPolicy: Never
+          command: ["/bin/sh", "/checks/endpoints.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: checks
+              mountPath: /checks
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: checks
+          configMap:
+            name: pruebas-http
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
