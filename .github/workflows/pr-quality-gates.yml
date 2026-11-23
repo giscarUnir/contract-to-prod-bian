@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       sandbox_run_id:
-        description: ID de una corrida con distribución validada. Si se indica, solo se prueba Kubernetes.
+        description: ID de una corrida validada para repetir CodeQL y Kubernetes sin generar nuevas fuentes.
         type: string
       sandbox_attempt:
         description: Intento que produjo el artefacto de distribución.
@@ -69,33 +69,12 @@ jobs:
           tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all --gitleaks-ignore-path .github/gitleaks.ignore .
 
-  fortify_config:
-    name: Configuración de Fortify
+  propose:
+    name: Generación completa con Gemini
+    needs: [contract, secrets]
     if: >-
       !inputs.sandbox_run_id &&
       (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - name: Comprobar la configuración de Fortify on Demand
-        shell: bash
-        env:
-          FOD_URL: ${{ vars.FOD_URL }}
-          FOD_RELEASE: ${{ vars.FOD_RELEASE }}
-          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
-          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
-        run: |
-          for setting in FOD_URL FOD_RELEASE FOD_CLIENT_ID FOD_CLIENT_SECRET; do
-            if [[ -z "${!setting}" ]]; then
-              echo "::error::Falta configurar $setting para Fortify on Demand."
-              missing=1
-            fi
-          done
-          exit "${missing:-0}"
-
-  propose:
-    name: Generación completa con Gemini
-    needs: [contract, secrets, fortify_config]
     uses: ./.github/workflows/gemini-proposal.yml
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -201,50 +180,73 @@ jobs:
           path: osv-report.json
           overwrite: true
 
-  fortify:
-    name: Fortify SAST y política de seguridad
+  codeql:
+    name: CodeQL y política de seguridad
     needs: validated
-    if: "!cancelled() && needs.validated.result == 'success'"
-    concurrency:
-      group: fortify-fod-release
-      cancel-in-progress: false
+    if: >-
+      !cancelled() && (needs.validated.result == 'success'
+      || (github.event_name == 'workflow_dispatch' && inputs.sandbox_run_id != ''))
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '25'
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: proyecto-validado-${{ needs.validated.outputs.attempt }}
+          name: proyecto-validado-${{ inputs.sandbox_run_id && inputs.sandbox_attempt || needs.validated.outputs.attempt }}
           path: current-account
-      - uses: fortify/github-action/setup@0540f6aefd95d12a5fbed40f406d825fad64330e # v3.1.1
+          run-id: ${{ inputs.sandbox_run_id || github.run_id }}
+          github-token: ${{ inputs.sandbox_run_id && github.token || '' }}
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
-          fcli: '3.30.0'
-          sc-client: '26.2.1'
-      - name: Preparar las fuentes y dependencias para el escaneo
+          languages: java-kotlin
+          build-mode: manual
+      - name: Compilar las fuentes generadas para CodeQL
+        shell: bash
+        run: mvn -B -ntp -f current-account/pom.xml -DskipTests compile
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /current-account/java
+          output: codeql-results
+          upload: ${{ inputs.sandbox_run_id && 'never' || 'always' }}
+          upload-database: false
+      - name: Bloquear la entrega ante alertas altas o críticas
         shell: bash
         run: |
-          mvn -B -ntp -f current-account/pom.xml generate-sources
-          fcli tool sc-client run --workdir "$PWD/current-account" --version 26.2.1 -- \
-            package --build-tool mvn --output "$RUNNER_TEMP/fortify.zip"
-          unzip -tq "$RUNNER_TEMP/fortify.zip"
-      - name: Ejecutar SAST y exigir que se cumpla la política de Fortify
-        shell: bash
-        env:
-          FOD_URL: ${{ vars.FOD_URL }}
-          FOD_RELEASE: ${{ vars.FOD_RELEASE }}
-          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
-          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
-          DO_SETUP: 'false'
-          DO_SAST_SCAN: 'true'
-          DO_WAIT: 'true'
-          DO_CHECK_POLICY: 'true'
-          DO_SAST_EXPORT: 'false'
-          DO_PR_COMMENT: 'false'
-          DO_AVIATOR_REMEDIATIONS: 'false'
-        run: USE_PACKAGE="$RUNNER_TEMP/fortify.zip" fcli action run ci
+          findings=$(jq -es '
+            if ([.[].runs[] | select(.tool.driver.name == "CodeQL" and (.results | type == "array"))] | length) == 0
+            then error("Falta un informe SARIF válido de CodeQL.")
+            else [
+              .[].runs[]
+              | (reduce (.tool | (.driver, .extensions[]?) | .rules[]?) as $rule
+                  ({}; .[$rule.id] = ($rule.properties["security-severity"] | tonumber? // 0))) as $severity
+              | .results[]
+              | select(($severity[.ruleId] // 0) >= 7)
+              | .ruleId
+            ] | length
+            end
+          ' codeql-results/*.sarif)
+          printf 'CodeQL encontró %s alertas de seguridad altas o críticas.\n' "$findings" | tee -a "$GITHUB_STEP_SUMMARY"
+          if (( findings > 0 )); then
+            echo '::error::CodeQL encontró alertas altas o críticas. Consulta el informe SARIF.'
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: "!cancelled()"
+        with:
+          name: seguridad-codeql
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          overwrite: true
 
   kubernetes:
     name: Despliegue y pruebas HTTP en Kubernetes
@@ -270,10 +272,10 @@ jobs:
 
   delivery:
     name: Entregar microservicio verificado
-    needs: [validated, dependencies, fortify, kubernetes]
+    needs: [validated, dependencies, codeql, kubernetes]
     if: >-
       !cancelled() && needs.validated.result == 'success' && needs.dependencies.result == 'success'
-      && needs.fortify.result == 'success' && needs.kubernetes.result == 'success'
+      && needs.codeql.result == 'success' && needs.kubernetes.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 4
     outputs:
@@ -294,7 +296,7 @@ jobs:
 
   report:
     name: Informe del PR
-    needs: [contract, secrets, fortify_config, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, fortify, kubernetes, delivery]
+    needs: [contract, secrets, propose, verify, repair, verify_repair, repair_again, verify_again, validated, dependencies, codeql, kubernetes, delivery]
     if: always() && !cancelled() && !inputs.sandbox_run_id
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -319,7 +321,6 @@ jobs:
             const stages = [
               ['Spectral y compatibilidad', jobs.contract.result],
               ['Escaneo de secretos', jobs.secrets.result],
-              ['Configuración de Fortify', jobs.fortify_config.result],
               ['Generación completa con Gemini', jobs.propose.result],
               ['Evaluación de la propuesta inicial', verification(jobs.verify)],
               ['Ajuste de la implementación con Gemini', jobs.repair.result],
@@ -328,7 +329,7 @@ jobs:
               ['Verificación del ajuste final', verification(jobs.verify_again)],
               ['Validación final', jobs.validated.result],
               ['Dependencias y SBOM', jobs.dependencies.result],
-              ['Fortify SAST y política de seguridad', jobs.fortify.result],
+              ['CodeQL y política de seguridad', jobs.codeql.result],
               ['Despliegue y pruebas HTTP dentro de Kubernetes', jobs.kubernetes.result],
               ['Entrega del microservicio', jobs.delivery.result],
             ];
